@@ -1,0 +1,16 @@
+{
+  "db_path": "~/Library/Application Support/N1Daily/lessons.sqlite3",
+  "vault_path": "",
+  "sender": "",
+  "recipient": "",
+  "timezone": "Asia/Hong_Kong",
+  "generate_time": "07:45",
+  "publish_time": "08:00",
+  "cutoff_time": "12:00",
+  "timeout_seconds": 30,
+  "ruby_mode": "html",
+  "llm_endpoint": "",
+  "generation_model": "",
+  "review_model": "",
+  "google_client_id": ""
+}

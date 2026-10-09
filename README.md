@@ -6,16 +6,35 @@ A side research goal is to experiment with Codex and GPT-6.1-Sol at high reasoni
 
 ## Run the prototype
 
-Use Python 3.11 or later. No third-party packages, installation step, or build is required. From this directory:
+Use Python 3.11 or later. No third-party packages, installation step, or build is required. Run commands from this repository's directory.
+
+`preview` renders the bundled sample unless you select another input. It creates local preview files without network access, secret-file loading, email delivery, vault writes, or publication accounting. Use it to inspect the email and Obsidian versions of a lesson.
+
+| Command | What it does |
+| --- | --- |
+| `python3 -m unittest discover -s tests -v` | Runs the automated test suite using temporary directories and fake services. |
+| `python3 -m n1_daily preview --output /tmp/n1-daily-preview` | Checks the bundled sample's structure and renders both email and Obsidian versions into the chosen directory. |
+| `python3 -m n1_daily validate --lesson examples/sample-lesson.json` | Runs mechanical content checks on the sample without creating preview files. It does not assess linguistic correctness through an LLM. |
+
+`preview` produces these files in its output directory:
+
+| File | Purpose |
+| --- | --- |
+| `lesson.html` | HTML email preview; open it in Safari or another browser. |
+| `lesson.eml` | MIME email containing HTML and plain-text alternatives; open it locally in Apple Mail. |
+| `lesson.txt` | Plain-text email alternative, with all questions before the answer key. |
+| `lesson.md` | Obsidian lesson with collapsed answer callouts. |
+| `lesson.json` | Copy of the lesson content used to create the previews. |
+
+Use `--lesson /path/to/lesson.json` to select a JSON input and run its mechanical checks. Use `--date YYYY-MM-DD` to select an existing **ready** lesson from SQLite. For example, after a lesson has been generated and saved:
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 -m n1_daily preview --output /tmp/n1-daily-preview
-python3 -m n1_daily dry-run --output /tmp/n1-daily-dry-run
-python3 -m n1_daily validate --lesson examples/sample-lesson.json
+python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09 --output /tmp/n1-saved-lesson
 ```
 
-Open `/tmp/n1-daily-preview/lesson.html` in a browser. The directory also contains `lesson.eml`, `lesson.txt`, `lesson.md`, and the source JSON. Both preview commands render locally without network access, email delivery, vault writes, or publication accounting. They reject output directories inside a configured vault, an identifiable Obsidian vault, or iCloud.
+The selected date must already have a ready record; `preview` does not generate missing content. If both `--date` and `--lesson` are supplied, `--date` takes precedence. Neither private file is needed for the bundled sample; saved content needs its database location through `--config`, `--db`, or the default path.
+
+`--output` overrides the configured `preview_path`. If neither is supplied, files go into `n1-daily-preview` under the operating system's temporary directory. Output directories inside a configured vault, an identifiable Obsidian vault, iCloud, or a launchd job directory are rejected.
 
 The authored sample includes all six question formats assigned to the first day, Japanese explanations, selective answer ruby, and English/Cantonese supplements. It has passed mechanical checks. It has not undergone a live model review. Test review verdicts are synthetic fixtures used to exercise the gate.
 
@@ -30,10 +49,10 @@ Set `llm_endpoint`, `generation_model`, and `review_model` in `config.json`, and
 ```sh
 python3 -m n1_daily generate --config /path/to/config.json --secrets /path/to/secrets.json
 python3 -m n1_daily status --config /path/to/config.json
-python3 -m n1_daily dry-run --config /path/to/config.json --date 2026-10-09
+python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09
 ```
 
-`generate` saves content and its matching structured review before readiness. `dry-run --date` renders a saved ready lesson without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
+`generate` saves content and its matching structured review before readiness. `preview --date` renders a saved ready lesson without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
 
 `--config` is required for `generate`, `publish`, `daily`, and `schedule`. Sample previews work without either private file. Secrets are loaded only when generation, review, or an unfinished Gmail send requires them. Saved ready lessons and completed channels remain usable without LLM credentials; vault delivery needs no secret file. Missing or invalid email credentials produce a definite channel failure, allowing vault delivery to continue.
 
@@ -69,6 +88,16 @@ For `unknown` email outcomes, inspect the sending mailbox. `resolve-email --date
 ## Validation before daily use
 
 Tests cover malformed content and ruby, ambiguous/incomplete reviews, correction limits, outages, independent channel retries, crash recovery, review dates, duplicate runs, timing, and edited-file conflicts. Configuration tests cover defaults, overrides, permissions, ownership, secret isolation, and credential-free reuse of saved lessons. Temporary directories and fake services keep tests offline.
+
+The user ran `python3 -m n1_daily preview --output /tmp/n1-daily-preview` and confirmed correct example-lesson rendering in these local previews:
+
+| Output | Client | Result |
+| --- | --- | --- |
+| `lesson.html` | Safari | Rendering confirmed |
+| `lesson.md` | Obsidian | Rendering confirmed |
+| `lesson.eml` | Apple Mail on macOS, opened as a local file | Rendering confirmed |
+
+Received Gmail messages, iPhone clients, offline answer controls, enlarged-text legibility, and iCloud synchronization still require verification.
 
 The following remain actual-client acceptance checks:
 

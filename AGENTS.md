@@ -2,7 +2,11 @@
 
 ## Specification-Driven Workflow
 
-Treat `n1-daily-email-design.md` as the product requirements. For every system change, update the specification first, present it for review, and pause until explicit user approval. Then begin implementation and tests. During review, edit only the specification and contributor guidance. Choose straightforward implementations and record decisions in `README.md`. Ask clarification questions only when a decision materially changes the requirements.
+Implement only behavior covered by explicitly approved requirements in `n1-daily-email-design.md`. Before adding or changing user-visible behavior, identify the supporting specification section and its approval. Do not infer additional features, commands, or aliases from ambiguous wording. Existing code and README descriptions do not establish approval.
+
+Chat requests proposing system changes must first become specification updates. Present the proposed changes for review and pause until explicit user approval before implementation or tests. If chat and specification differ, surface the discrepancy during review. Attribute requirements accurately: distinguish chat instructions, specification text, and your own proposals. During review, edit only the specification and contributor guidance.
+
+Choose straightforward implementation details within approved scope and record them in `README.md`. Ask clarification questions only when a decision materially changes the requirements. Before reporting completion, check the diff against approved scope and disclose any deviations.
 
 ## Project Structure & Module Organization
 
@@ -10,7 +14,7 @@ Modules live in `n1_daily/`, tests in `tests/`, and the complete sample lesson i
 
 ## Build, Test, and Development Commands
 
-Use Python 3.11 or later and the standard library. Run `python3 -m unittest discover -s tests -v` for tests. Run `python3 -m n1_daily preview` or `python3 -m n1_daily dry-run` to produce email and Markdown previews without delivery. See `README.md` for setup and other commands.
+Use Python 3.11 or later and the standard library. Run `python3 -m unittest discover -s tests -v` for tests. Run `python3 -m n1_daily preview` to produce email and Markdown previews without delivery. See `README.md` for setup and other commands.
 
 ## Coding Style & Naming Conventions
 

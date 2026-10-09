@@ -10,7 +10,7 @@ from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
 from test_content import sample
-from n1_daily.cli import main
+from n1_daily.cli import main, parser
 from n1_daily.config import Config
 from n1_daily.files import checksum, write_generated
 from n1_daily.llm import JsonModel
@@ -88,18 +88,24 @@ class CliTests(unittest.TestCase):
         path.write_text(json.dumps(values or {}))
         return str(path)
 
-    def test_preview_and_dry_run_produce_both_outputs_without_services_or_vault(self):
+    def test_preview_produces_all_outputs_without_services_or_vault(self):
         vault = self.root / "real-vault"
         vault.mkdir()
         config = self.config_file({"vault_path": str(vault)})
-        for command in ("preview", "dry-run"):
-            with patch("n1_daily.services.urlopen", side_effect=AssertionError("network forbidden")):
-                output = self.root / command
-                self.assertEqual(0, self.invoke([command, "--config", config, "--output", str(output)]))
-                self.assertTrue((output / "lesson.html").exists())
-                self.assertTrue((output / "lesson.md").exists())
-                self.assertTrue((output / "lesson.eml").exists())
-            self.assertEqual([], list(vault.iterdir()))
+        with patch("n1_daily.services.urlopen", side_effect=AssertionError("network forbidden")):
+            output = self.root / "preview"
+            self.assertEqual(0, self.invoke(["preview", "--config", config, "--output", str(output)]))
+            self.assertEqual({"lesson.html", "lesson.eml", "lesson.txt", "lesson.md", "lesson.json"},
+                             {path.name for path in output.iterdir()})
+        self.assertEqual([], list(vault.iterdir()))
+
+    def test_removed_dry_run_is_rejected_without_outputs(self):
+        output = self.root / "removed-command"
+        with self.assertRaises(SystemExit) as caught:
+            self.invoke(["dry-run", "--output", str(output)])
+        self.assertEqual(2, caught.exception.code)
+        self.assertFalse(output.exists())
+        self.assertNotIn("dry-run", parser().format_help())
 
     def test_preview_rejects_vault_output_directory(self):
         vault = self.root / "vault"
@@ -124,7 +130,7 @@ class CliTests(unittest.TestCase):
         store = Store(db)
         generate(store, "2026-10-09", FakeModel())
         store.close()
-        self.assertEqual(0, self.invoke(["dry-run", "--date", "2026-10-09", "--db", str(db), "--output", str(self.root / "saved")]))
+        self.assertEqual(0, self.invoke(["preview", "--date", "2026-10-09", "--db", str(db), "--output", str(self.root / "saved")]))
 
     def test_schedule_export_never_installs_a_job(self):
         import plistlib

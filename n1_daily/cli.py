@@ -22,18 +22,18 @@ from .workflow import daily, deliver, generate
 def parser():
     root = argparse.ArgumentParser(description="Daily original JLPT N1 practice")
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("preview", "dry-run", "validate", "generate", "publish", "daily", "status", "resolve-email", "schedule"):
+    for name in ("preview", "validate", "generate", "publish", "daily", "status", "resolve-email", "schedule"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, help="explicit path to config.json")
         command.add_argument("--secrets", type=Path, help="explicit path to private secrets.json; loaded only for service requests")
         command.add_argument("--db", type=Path)
         if name not in ("schedule", "daily"):
             command.add_argument("--date", type=date.fromisoformat)
-        if name in ("preview", "dry-run", "validate"):
+        if name in ("preview", "validate"):
             command.add_argument("--lesson", type=Path)
-        if name in ("preview", "dry-run", "schedule"):
+        if name in ("preview", "schedule"):
             command.add_argument("--output", type=Path)
-        if name in ("preview", "dry-run", "publish", "daily"):
+        if name in ("preview", "publish", "daily"):
             command.add_argument("--ruby-mode", choices=("html", "parentheses"))
         if name in ("publish", "daily"):
             command.add_argument("--activate-email", action="store_true")
@@ -167,7 +167,7 @@ def main(arguments=None):
             export_schedule(args, config)
             return 0
         ruby_mode = getattr(args, "ruby_mode", None) or config.ruby_mode
-        if args.command in ("preview", "dry-run", "validate"):
+        if args.command in ("preview", "validate"):
             lesson = preview_lesson(args, config)
             if args.command == "validate":
                 print("Mechanical content checks passed; linguistic review is still required")
@@ -186,7 +186,7 @@ def main(arguments=None):
         now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
         day = (getattr(args, "date", None) or now.date()).isoformat()
         if args.command == "publish" and (day != now.date().isoformat() or not config.publish_time <= now.time() <= config.cutoff_time):
-            raise ValueError("Publication is limited to today's configured window; use dry-run to view another date")
+            raise ValueError("Publication is limited to today's configured window; use preview to view another date")
         with run_lock(config.db_path):
             store = Store(config.db_path)
             try:

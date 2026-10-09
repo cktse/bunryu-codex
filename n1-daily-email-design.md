@@ -4,6 +4,8 @@ Status: proposed. This document defines the first working version and supersedes
 
 **Configuration revision: approved.** The JSON configuration requirements below replace environment configuration. Implementation proceeds under this approved revision; live delivery and scheduling still require explicit activation.
 
+**Preview command revision: approved.** Remove the `dry-run` command and retain `preview` as the sole local rendering command. The requirements appear under “Local preview” and in the acceptance table. Approval covers this removal and its tests and documentation. The [implementation reconciliation](spec-reconciliation.md) records other gaps separately; its recommendations are not approved requirements.
+
 ## Development process
 
 Follow specification-driven development. Every system change starts with an update to this document and a review pause. Implementation and its tests begin only after the user explicitly approves the proposed specification. After approval, use test-driven development and continue until the approved behavior runs locally. Record straightforward implementation choices and concise setup instructions in `README.md`.
@@ -43,6 +45,12 @@ Store lesson content as JSON in SQLite and generate Markdown from it. JSON makes
 
 Markdown authority would make direct editing convenient, but would require the application to reconstruct question structure and answers from edited notes. That additional parsing and synchronization is outside this MVP.
 
+### Local preview
+
+Provide `python3 -m n1_daily preview` for local rendering, retaining its existing options. Produce `lesson.html`, `lesson.eml` (HTML and plain-text MIME alternatives), `lesson.txt`, `lesson.md`, and `lesson.json` in the selected preview directory. Preview must work without network access or secret-file loading and must not generate lessons, send email, write into the real vault, or record publication or review exposure.
+
+Remove `dry-run` entirely, including any compatibility alias; invoking it must produce an unknown-command error. Update CLI help, README examples, contributor guidance, and tests to use `preview` consistently. Other behavior changes identified in the reconciliation require separate specification review.
+
 ### Configuration and secrets
 
 Load nonsecret settings from `config.json` and credentials from `secrets.json`, using explicit file arguments. Both files contain flat JSON objects. The following table defines every JSON field, private-file argument, and configuration override; examples are illustrative and contain no working credentials.
@@ -52,7 +60,7 @@ Load nonsecret settings from `config.json` and credentials from `secrets.json`, 
 | CLI | `--config` | Path to the settings JSON file; keep it outside iCloud and the vault. Scheduled invocations use an absolute path. | `generate`, `publish`, `daily`, and `schedule`; optional for local previews, validation, status, and email-outcome resolution | No file is discovered or loaded; commands that permit omission use the defaults below | `--config /private/path/config.json` |
 | CLI | `--secrets` | Path to the credentials JSON file, outside iCloud and the vault. It must be owned by the running user with permissions `0600` or `0400`. Scheduled invocations use an absolute path. | Before an LLM or Gmail request; a schedule using these services must include the path | No secret file is loaded; service requests requiring credentials cannot proceed | `--secrets /private/path/secrets.json` |
 | CLI | `--db` | SQLite path overriding `db_path`; outside iCloud and the vault | Optional | Uses `db_path` or its default below | `--db /private/path/lessons.sqlite3` |
-| CLI | `--output` | Preview directory for `preview`/`dry-run`, or destination file for an inactive `schedule` export; outside iCloud, the vault, and launchd job directories | `schedule`; optional for previews | Previews use `preview_path`; schedule export has no default destination | `--output /tmp/n1-daily-preview` or `--output /tmp/n1-daily.plist` |
+| CLI | `--output` | Preview directory for `preview`, or destination file for an inactive `schedule` export; outside iCloud, the vault, and launchd job directories | `schedule`; optional for previews | Previews use `preview_path`; schedule export has no default destination | `--output /tmp/n1-daily-preview` or `--output /tmp/n1-daily.plist` |
 | CLI | `--ruby-mode` | String `html` or `parentheses` overriding Obsidian answer annotation settings for this invocation | Optional | Uses `ruby_mode` or its default below | `--ruby-mode parentheses` |
 | `config.json` | `db_path` | String path to the authoritative SQLite lesson history; outside iCloud and the vault | Optional | `~/Library/Application Support/N1Daily/lessons.sqlite3` | `"~/Library/Application Support/N1Daily/lessons.sqlite3"` |
 | `config.json` | `preview_path` | String path for local HTML, MIME email, plain text, Markdown, and JSON previews; outside iCloud and the vault | Optional | `n1-daily-preview` under the operating system's temporary directory | `"/tmp/n1-daily-preview"` |
@@ -249,6 +257,7 @@ Use one complete sample lesson and deliberate failure examples to establish the 
 
 | Demonstration | Expected result |
 | --- | --- |
+| Local preview | `preview` produces all five local artifacts without service calls, secret loading, delivery, or publication accounting; `dry-run` is rejected as an unknown command. |
 | Missing option or invalid ruby range | The application identifies the question and field and blocks publication. |
 | Two defensible answers or a wrong distractor explanation | The review identifies the options and explains the defect; the draft does not become ready. |
 | Corrected draft still fails | Generation stops after the one permitted correction and neither channel publishes it. |

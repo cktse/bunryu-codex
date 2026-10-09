@@ -203,14 +203,14 @@ class JsonCliTests(unittest.TestCase):
         try:
             os.chdir(self.root)
             with patch.dict(os.environ, {"N1_TIMEOUT_SECONDS": "0", "N1_PREVIEW_PATH": str(self.root / "wrong")}):
-                self.assertEqual(0, self.invoke(["dry-run", "--output", str(self.root / "preview")]))
+                self.assertEqual(0, self.invoke(["preview", "--output", str(self.root / "preview")]))
         finally:
             os.chdir(previous)
 
     def test_explicit_overrides_take_precedence(self):
         self.ready()
         self.config_path.write_text(json.dumps({"db_path": "unused.sqlite3", "preview_path": "unused-preview", "ruby_mode": "html"}))
-        result = self.invoke(["dry-run", "--config", str(self.config_path), "--db", str(self.db), "--date", "2026-10-09", "--output", str(self.root / "chosen"), "--ruby-mode", "parentheses"])
+        result = self.invoke(["preview", "--config", str(self.config_path), "--db", str(self.db), "--date", "2026-10-09", "--output", str(self.root / "chosen"), "--ruby-mode", "parentheses"])
         self.assertEqual(0, result)
         self.assertFalse((self.root / "unused-preview").exists())
         self.assertIn("脆弱（ぜいじゃく）", (self.root / "chosen/lesson.md").read_text())
@@ -223,7 +223,7 @@ class JsonCliTests(unittest.TestCase):
         previous = Path.cwd()
         try:
             os.chdir(work)
-            self.assertEqual(0, self.invoke(["dry-run", "--config", "../config.json", "--db", "../lessons.sqlite3", "--date", "2026-10-09", "--output", "preview"]))
+            self.assertEqual(0, self.invoke(["preview", "--config", "../config.json", "--db", "../lessons.sqlite3", "--date", "2026-10-09", "--output", "preview"]))
         finally:
             os.chdir(previous)
         self.assertTrue((work / "preview/lesson.md").exists())

@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import urlparse
 
 CONFIG_FIELDS = {"db_path", "preview_path", "vault_path", "sender", "recipient", "timezone",
                  "generate_time", "publish_time", "cutoff_time", "timeout_seconds", "ruby_mode",
@@ -18,6 +18,17 @@ SECRET_FIELDS = {"llm_api_key", "google_client_secret", "google_refresh_token"}
 UNSET_FIELDS = {"vault_path", "sender", "recipient", "llm_endpoint", "generation_model",
                 "review_model", "google_client_id"}
 ADDRESS = re.compile(r"[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+")
+
+
+def valid_endpoint(endpoint):
+    try:
+        parsed = urlparse(endpoint)
+        parsed.port
+        return (parsed.scheme == "https" and bool(parsed.hostname) and bool(parsed.path)
+                and parsed.username is None and parsed.password is None and "?" not in endpoint
+                and "#" not in endpoint and not any(c.isspace() for c in endpoint))
+    except ValueError:
+        return False
 
 
 class ConfigError(ValueError):
@@ -144,17 +155,8 @@ class Config:
         if values.get("ruby_mode", "html") not in ("html", "parentheses"):
             raise ConfigError(source, "ruby_mode", "expected html or parentheses")
         endpoint = values.get("llm_endpoint", "")
-        if endpoint:
-            try:
-                parsed = urlparse(endpoint)
-                invalid = (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-                           or parsed.fragment or any(c.isspace() for c in endpoint)
-                           or any(key.lower() in ("key", "api_key", "token", "access_token") for key, _ in parse_qsl(parsed.query)))
-                parsed.port  # Validate a supplied port without echoing the URL.
-            except ValueError:
-                invalid = True
-            if invalid:
-                raise ConfigError(source, "llm_endpoint", "expected a full HTTPS endpoint without embedded credentials")
+        if endpoint and not valid_endpoint(endpoint):
+            raise ConfigError(source, "llm_endpoint", "expected HTTPS host and path with no userinfo, query, or fragment")
         for name in ("sender", "recipient"):
             if values.get(name) and not ADDRESS.fullmatch(values[name]):
                 raise ConfigError(source, name, "expected one email address without a display name or list")

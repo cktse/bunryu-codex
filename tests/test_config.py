@@ -174,7 +174,9 @@ class JsonCliTests(unittest.TestCase):
 
     def invoke(self, args):
         self.stdout, self.stderr = io.StringIO(), io.StringIO()
-        with redirect_stdout(self.stdout), redirect_stderr(self.stderr):
+        with redirect_stdout(self.stdout), redirect_stderr(self.stderr), patch("n1_daily.cli.datetime") as clock, patch("n1_daily.cli.notification"):
+            clock.now.return_value = self.now
+            clock.fromisoformat = datetime.fromisoformat
             return main(args)
 
     def ready(self):
@@ -236,7 +238,7 @@ class JsonCliTests(unittest.TestCase):
         secrets.chmod(0o600)
         for extra in ([], ["--secrets", str(secrets)]):
             with self.subTest(extra=extra), patch("n1_daily.services.urlopen", side_effect=AssertionError("no network")):
-                self.assertEqual(2, self.invoke(["generate", "--config", str(self.config_path), "--date", "2026-10-09", *extra]))
+                self.assertEqual(1, self.invoke(["generate", "--config", str(self.config_path), "--date", "2026-10-09", *extra]))
                 self.assertNotIn("DO_NOT_LOG", self.stderr.getvalue())
 
     def test_json_config_drives_generation_and_review_without_secret_leaks(self):

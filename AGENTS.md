@@ -30,7 +30,7 @@ Test-driven development is the default. Write meaningful `unittest` cases in `te
 
 ## Commit & Pull Request Guidelines
 
-Use imperative commit subjects, such as `Add vocabulary lookup`; no Git convention is established. Pull requests should describe behavior and validation, link issues, and identify outstanding client checks.
+Use concise, imperative commit subjects. Existing commits demonstrate `feat:` and `fix:` prefixes; broader conventions have not been established. Pull requests should describe behavior and validation, link issues, and identify outstanding client checks.
 
 ## Security & Configuration
 

@@ -2,6 +2,7 @@
 
 import base64
 import json
+from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -43,7 +44,9 @@ class GmailSender:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 token = json.load(response)["access_token"]
-        except (OSError, ValueError, KeyError, TypeError) as error:
+            if not isinstance(token, str) or not token.strip():
+                raise ValueError("OAuth response contained no usable access token")
+        except (OSError, HTTPException, ValueError, KeyError, TypeError) as error:
             if isinstance(error, HTTPError):
                 error.close()
             raise DefiniteFailure("OAuth refresh failed before Gmail send") from error
@@ -56,7 +59,7 @@ class GmailSender:
             if error.code >= 500 or error.code == 408:
                 raise UncertainSend(f"Gmail returned HTTP {error.code}; check the sending mailbox") from error
             raise DefiniteFailure(f"Gmail rejected the request: HTTP {error.code}") from error
-        except (OSError, ValueError) as error:
+        except (OSError, HTTPException, ValueError) as error:
             raise UncertainSend("Gmail response lost or unreadable; check the sending mailbox") from error
         if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not result["id"]:
             raise UncertainSend("Gmail response has no message ID; check the sending mailbox")

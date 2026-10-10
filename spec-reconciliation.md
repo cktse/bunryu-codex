@@ -4,7 +4,28 @@ Audit date: 2026-10-09. Baseline: commit `3d32620` plus the working directory. T
 
 At the initial audit, the specification proposed removing `dry-run` and retaining `preview`; the application, tests, and command documentation still exposed both commands pending review. No production code or tests were changed during that audit. No email was sent, real-vault lesson files written, or schedule enabled.
 
-**Approved follow-up: preview only.** The user subsequently approved removal of `dry-run`. It has been removed from the CLI and help, README examples, and contributor commands. Tests now use `preview` and verify that `dry-run` is rejected without creating outputs. All 80 tests pass. The tables below retain the initial audit findings; the duplicate-command item is resolved. F1–F8 and other scope decisions remain pending specification review.
+**Approved follow-up: preview only.** The user subsequently approved removal of `dry-run`. It was removed from the CLI and help, README examples, and contributor commands, with 80 tests passing at that stage. The duplicate-command item is resolved.
+
+## Approved reconciliation follow-up
+
+The user approved specification section 9. Its offline implementation is complete, with **115 tests passing**, including 35 new regression tests in [test_reconciliation.py](tests/test_reconciliation.py). Initial failing runs reproduced the audit defects before their fixes. The remaining tables and findings below preserve the original audit snapshot; they do not describe unresolved defects after this follow-up.
+
+| Finding | Implemented behavior | Regression evidence |
+| --- | --- | --- |
+| F1 | Published material supplies teaching history; malformed entries produce date/field diagnostics, usable questions are retained, and failed drafts remain stored. | Cross-date generation with malformed failed drafts; preserved raw drafts; partial published history; no reservation of unpublished targets. |
+| F2 | Truncated LLM reads are retryable; OAuth failures and malformed access tokens are definite; incomplete Gmail send responses are unknown. | Draft/review recovery with unchanged budget and no duplicate generation; safe diagnostics; OAuth and send response classification. |
+| F3 | Requested channel setup is independent; a missing vault records a Markdown failure while email succeeds. Completed channels need no service settings. | Repair the vault and complete its files without resending email or loading deleted credentials; inverse email setup failures remain covered. |
+| F4 | Setup failures are persisted and notified while preserving phase/draft. Initial setup failure leaves attempt count 0; unchanged daily failures do not repeat notifications. | Missing settings, unusable secrets/permissions, review-phase failures, and recovery after repair. |
+| F5 | Ruby paths match exact existing answer fields; suffixes and non-ordering reconstructed fields are rejected. | Exact field-path failures with otherwise matching offsets; existing answer-only rendering and hiragana/bounds/overlap tests. |
+| F6 | Failed reviews require reason, offending text, and change. Incomplete reports are retained and rejected with field-specific correction feedback. | Missing/empty/mistyped fields, saved feedback, and exhausted correction limit across retries. |
+| F7 | Saved lessons are rechecked using their persisted assignment and prior published history. Standalone inputs support later themes/formats and report their limits. | Corrupted ready content, historical duplicates, standalone review-reference shapes, input conflicts/duplicate JSON keys, and missing/corrupt context. |
+| F8 | Endpoints require HTTPS host/path with no userinfo, query, or fragment. Rejected values are absent from errors. | Query parameters and encoded names, empty userinfo, fragments, invalid ports, HTTP, and missing path. |
+
+Related scope gaps are resolved under section 9: generation is restricted to today and the configured window; read-only commands do not create or modify SQLite or recover active sends; publication uses observed completion time; cutoff closes missed/partial delivery once; review ties use question ID then lesson ID; unknown-email resolution retains saved bytes. Tests cover window endpoints/overlap, completed-channel reuse, publication across midnight, cutoff between channels/index work, notification deduplication, review cap/postponement, and both mailbox decisions. Existing review tests cover all four delays, delayed exposure, and completion of the sequence.
+
+The forward specification baseline is explicitly approved. README documents the supported CLI semantics and exit codes, endpoint restrictions, setup, and implementation choices. AGENTS now describes the observed `feat:`/`fix:` commit examples. Scheduling still exports the same inactive two-channel artifact; no selection or installation commands were added. Published-content correction tooling remains deferred.
+
+Static reading found the sample's English and traditional-script Cantonese supplements readable. The Japanese ordering explanation now states the comparison in context. The sample's N1 difficulty and estimated duration remain unverified by the user; synthetic verdicts and static reading do not establish linguistic acceptance. Actual provider behavior, received messages, iPhone clients, offline controls, enlarged-text legibility, iCloud synchronization, launchd execution, and Mac notification display remain pending separately authorized acceptance work. No live services, real-vault lesson writes, or scheduling were activated.
 
 ## Evidence and limits
 
@@ -150,4 +171,4 @@ Confirmed offline with a synthetic value. No actual credential leak was observed
 
 ## Review boundary
 
-The only product revision approved after this audit is removing `dry-run` while retaining `preview`; its CLI, test, README, and AGENTS updates are complete. That approval does not approve fixes or scope decisions elsewhere in this report. Those findings require specification updates and review before implementation under the repository's workflow.
+The user approved both removal of `dry-run` and specification section 9. Those offline implementation, test, README, and AGENTS updates are complete. The initial scope questions are resolved as recorded above; the original audit remains a historical record. Live activation and any further system changes still require their respective explicit requests and specification review.

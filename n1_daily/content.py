@@ -43,7 +43,7 @@ def plain(value):
             and not re.search(r"<[/!]?[A-Za-z][^>]*>", value))
 
 
-def check_lesson(lesson, assignment, history):
+def check_lesson(lesson, assignment=None, history=None):
     errors = []
     if not isinstance(lesson, dict):
         return ["lesson: expected an object"]
@@ -51,12 +51,16 @@ def check_lesson(lesson, assignment, history):
         if not plain(lesson.get(field)):
             errors.append(f"lesson.{field}: required normalized plain text")
     try:
-        date.fromisoformat(lesson.get("date", ""))
+        value = lesson.get("date", "")
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            raise ValueError("invalid date format")
+        date.fromisoformat(value)
     except (ValueError, TypeError):
         errors.append("lesson.date: expected YYYY-MM-DD")
-    if lesson.get("date") != assignment["date"] or lesson.get("lesson_id") != f'n1-{assignment["date"]}':
+    expected_date = assignment["date"] if assignment else lesson.get("date")
+    if lesson.get("date") != expected_date or lesson.get("lesson_id") != f'n1-{expected_date}':
         errors.append("lesson.date/lesson_id: must match assignment")
-    if lesson.get("theme") != assignment["theme"]:
+    if lesson.get("theme") not in THEMES or (assignment and lesson.get("theme") != assignment["theme"]):
         errors.append("lesson.theme: must match assignment")
     minutes = lesson.get("estimated_minutes")
     if type(minutes) is not int or not 10 <= minutes <= 15:
@@ -64,21 +68,28 @@ def check_lesson(lesson, assignment, history):
     questions = lesson.get("questions")
     if not isinstance(questions, list) or len(questions) != 6:
         return errors + ["lesson.questions: expected six questions"]
-    history = [old for old in history if isinstance(old, dict) and isinstance(old.get("questions"), list)]
+    has_history = history is not None
+    history = [old for old in (history or []) if isinstance(old, dict) and old.get("first_published_at")
+               and isinstance(old.get("questions"), list)]
     past_questions = [q for old in history for q in old["questions"] if isinstance(q, dict)]
-    published = [old for old in history if old.get("first_published_at")]
-    originals = {(old["lesson_id"], q["id"]): q for old in published for q in old["questions"]}
+    originals = {(old["lesson_id"], q["id"]): q for old in history for q in old["questions"]
+                 if isinstance(old.get("lesson_id"), str) and isinstance(q, dict) and isinstance(q.get("id"), str)}
     targets = {(q["subject"], q["target"]) for q in past_questions
                if isinstance(q.get("subject"), str) and isinstance(q.get("target"), str)}
     seen_wording = {wording(q) for q in past_questions}
     seen_targets = set()
     reviews = 0
+    formats = [q.get("type") if isinstance(q, dict) else None for q in questions]
+    rotations = [[ROTATION[(i + j) % 4] for j in range(3)] for i in range(4)]
+    if formats[:3] != list(FIXED) or formats[3:] not in rotations:
+        errors.append("lesson.questions: required fixed formats and a valid three-format rotation expected")
     for i, q in enumerate(questions):
         label = f"q{i + 1}"
-        slot = assignment["slots"][i]
         if not isinstance(q, dict):
             errors.append(f"{label}: expected an object")
             continue
+        slot = assignment["slots"][i] if assignment else {
+            "type": q.get("type"), "subject": SUBJECTS.get(str(q.get("type"))), "review_of": q.get("review_of")}
         if q.get("id") != label:
             errors.append(f"{label}.id: must match display position")
         for field in ("type", "subject"):
@@ -102,19 +113,21 @@ def check_lesson(lesson, assignment, history):
                 or any(not plain(v) for v in distractors.values())):
             errors.append(f"{label}.distractors_ja: exactly three incorrect-option explanations required")
         for field in ("supplement_en", "supplement_yue"):
-            if q.get(field) and not plain(q[field]):
+            if field in q and q[field] != "" and not plain(q[field]):
                 errors.append(f"{label}.{field}: expected normalized plain text")
         ref = q.get("review_of")
         if ref != slot.get("review_of"):
             errors.append(f"{label}.review_of: must match assigned review slot")
         pair = (str(q.get("subject")), str(q.get("target")))
-        if ref:
+        if ref is not None:
             reviews += 1
             valid_ref = isinstance(ref, dict) and all(isinstance(ref.get(k), str) for k in ("lesson_id", "question_id"))
             origin = originals.get((ref["lesson_id"], ref["question_id"])) if valid_ref else None
-            if not origin:
+            if not valid_ref:
+                errors.append(f"{label}.review_of: expected lesson_id and question_id strings")
+            elif has_history and not origin:
                 errors.append(f"{label}.review_of: must reference an existing published question")
-            elif pair != (origin["subject"], origin["target"]):
+            elif origin and pair != (origin.get("subject"), origin.get("target")):
                 errors.append(f"{label}.target: review must preserve original subject/target")
         elif pair in targets or pair in seen_targets:
             errors.append(f"{label}.target: new subject/target already taught or duplicated")
@@ -129,8 +142,9 @@ def check_lesson(lesson, assignment, history):
                 errors.append(f"{label}.correct_order: expected a permutation of A–D")
             if type(star) is not int or not 1 <= star <= 4 or (valid_order and order[star - 1] != key):
                 errors.append(f"{label}.starred_position: must be 1–4 and match the answer key")
-            if any(not isinstance(q.get(f), str) for f in ("prefix_ja", "suffix_ja")):
-                errors.append(f"{label}.prefix_ja/suffix_ja: required strings")
+            for field in ("prefix_ja", "suffix_ja"):
+                if q.get(field) != "" and not plain(q.get(field)):
+                    errors.append(f"{label}.{field}: required normalized plain-text string (may be empty)")
             if not plain(q.get("reconstructed_sentence_ja")):
                 errors.append(f"{label}.reconstructed_sentence_ja: required")
             elif valid_order and set(options) == set("ABCD"):
@@ -173,9 +187,13 @@ def check_lesson(lesson, assignment, history):
 
 
 def answer_field(q, field):
-    if field in ("answer_ja", "explanation_ja", "reconstructed_sentence_ja"):
+    if field in ("answer_ja", "explanation_ja"):
         value = q.get(field)
-    elif isinstance(field, str) and field.startswith("distractors_ja."):
+    elif field == "reconstructed_sentence_ja" and q.get("type") == "sentence_ordering":
+        value = q.get(field)
+    elif isinstance(field, str) and re.fullmatch(r"distractors_ja\.[A-D]", field):
+        if field[-1] == q.get("correct_option_id"):
+            return None
         distractors = q.get("distractors_ja", {})
         value = distractors.get(field.split(".")[1]) if isinstance(distractors, dict) else None
     else:
@@ -207,13 +225,19 @@ def check_review(lesson, review):
             errors.append(f"{label}.criteria: all seven content criteria required")
             continue
         for name, result in criteria.items():
-            if not isinstance(result, dict) or not plain(result.get("reason")):
-                errors.append(f"{label}.{name}: reasoned result required")
+            if not isinstance(result, dict):
+                errors.append(f"{label}.{name}: reasoned result object required")
                 continue
+            if not plain(result.get("reason")):
+                errors.append(f"{label}.{name}.reason: nonempty plain-text reason required")
             status = result.get("status")
+            if status == "fail":
+                for field in ("offending_text", "change"):
+                    if not plain(result.get(field)):
+                        errors.append(f"{label}.{name}.{field}: nonempty plain-text failure detail required")
             absent_supplement = name == "supplement_accuracy" and not q.get("supplement_en") and not q.get("supplement_yue")
             if status == "inapplicable" and absent_supplement:
                 continue
             if status != "pass":
-                errors.append(f'{label}.{name}: {result["reason"]}; offending text: {result.get("offending_text", "")}; change: {result.get("change", "")}')
+                errors.append(f'{label}.{name}: {result.get("reason", "")}; offending text: {result.get("offending_text", "")}; change: {result.get("change", "")}')
     return errors

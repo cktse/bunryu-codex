@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 
 from .content import sample_assignment
 
@@ -34,8 +35,14 @@ def run_lock(database_path):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, readonly=False):
         self.path = Path(path).expanduser().resolve()
+        self.diagnostics = []
+        if readonly:
+            self.conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=5)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA query_only=ON")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, timeout=5)
         os.chmod(self.path, 0o600)
@@ -78,7 +85,19 @@ class Store:
             return None
         result = dict(row)
         for key in JSON_COLUMNS:
-            result[key] = json.loads(result[key]) if result[key] is not None else None
+            try:
+                result[key] = json.loads(result[key]) if result[key] is not None else None
+            except (ValueError, TypeError):
+                raise RuntimeError(f"Stored {day}.{key}: invalid JSON") from None
+        assignment = result["assignment"]
+        if (not isinstance(assignment, dict) or not isinstance(assignment.get("date"), str)
+                or not isinstance(assignment.get("theme"), str) or not isinstance(assignment.get("slots"), list)
+                or len(assignment["slots"]) != 6 or any(not isinstance(slot, dict)
+                    or not {"type", "subject", "review_of"} <= slot.keys() for slot in assignment["slots"])):
+            raise RuntimeError(f"Stored {day}.assignment: invalid layout")
+        for key in ("failure_reasons", "correction_feedback"):
+            if not isinstance(result[key], list) or any(not isinstance(reason, str) for reason in result[key]):
+                raise RuntimeError(f"Stored {day}.{key}: invalid layout")
         if isinstance(result["lesson"], dict):
             result["lesson"].update({key: result[key] for key in (
                 "status", "attempt_count", "review_result", "failure_reasons", "first_published_at")})
@@ -108,7 +127,7 @@ class Store:
             self.conn.execute("UPDATE lessons SET email_status='unknown', email_error='Interrupted send; check the sending mailbox' WHERE email_status='sending'")
 
     def history(self, before=None, published_only=False):
-        conditions = ["lesson IS NOT NULL"]
+        conditions = [] if published_only else ["lesson IS NOT NULL"]
         args = []
         if before:
             conditions.append("date < ?")
@@ -116,10 +135,35 @@ class Store:
         if published_only:
             conditions.append("first_published_at IS NOT NULL")
         rows = self.conn.execute("SELECT date FROM lessons WHERE " + " AND ".join(conditions) + " ORDER BY date", args)
-        return [record["lesson"] for row in rows if isinstance((record := self.get(row["date"]))["lesson"], dict)]
+        lessons = []
+        for row in rows:
+            record = self.get(row["date"])
+            lesson = record["lesson"]
+            if not isinstance(lesson, dict) or not isinstance(lesson.get("lesson_id"), str):
+                self.history_diagnostic(row["date"], "lesson/lesson_id")
+                continue
+            questions = lesson.get("questions")
+            if not isinstance(questions, list):
+                self.history_diagnostic(row["date"], "questions")
+                questions = []
+            usable = []
+            for i, question in enumerate(questions, 1):
+                if (isinstance(question, dict) and isinstance(question.get("id"), str)
+                        and isinstance(question.get("subject"), str) and isinstance(question.get("target"), str)):
+                    usable.append(question)
+                else:
+                    self.history_diagnostic(row["date"], f"questions.q{i}")
+            lessons.append({**lesson, "questions": usable})
+        return lessons
+
+    def history_diagnostic(self, day, field):
+        message = f"History {day}.{field}: malformed entry; using remaining usable published material"
+        if message not in self.diagnostics:
+            self.diagnostics.append(message)
+            print(message, file=sys.stderr)
 
     def review_items(self):
-        return [dict(row) for row in self.conn.execute("SELECT * FROM review_items ORDER BY due_date, lesson_id, question_id")]
+        return [dict(row) for row in self.conn.execute("SELECT * FROM review_items ORDER BY due_date, question_id, lesson_id")]
 
     def assignment(self, day):
         count = self.conn.execute("SELECT count(*) FROM lessons WHERE first_published_at IS NOT NULL").fetchone()[0]
@@ -138,7 +182,7 @@ class Store:
         return assignment
 
     def context(self, day, assignment):
-        history = self.history(before=day)
+        history = self.history(before=day, published_only=True)
         pairs = sorted({(q["subject"], q["target"]) for old in history for q in old.get("questions", [])
                         if isinstance(q, dict) and isinstance(q.get("subject"), str) and isinstance(q.get("target"), str)})
         originals = []

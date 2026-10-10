@@ -14,7 +14,8 @@ Use Python 3.11 or later. No third-party packages, installation step, or build i
 | --- | --- |
 | `python3 -m unittest discover -s tests -v` | Runs the automated test suite using temporary directories and fake services. |
 | `python3 -m n1_daily preview --output /tmp/n1-daily-preview` | Checks the bundled sample's structure and renders both email and Obsidian versions into the chosen directory. |
-| `python3 -m n1_daily validate --lesson examples/sample-lesson.json` | Runs mechanical content checks on the sample without creating preview files. It does not assess linguistic correctness through an LLM. |
+| `python3 -m n1_daily validate` | Checks the bundled sample's structure and first-day assignment without creating files. |
+| `python3 -m n1_daily validate --lesson examples/sample-lesson.json` | Checks a standalone JSON lesson's structure; reports that assignment/history checks and LLM review were not performed. |
 
 `preview` produces these files in its output directory:
 
@@ -26,13 +27,23 @@ Use Python 3.11 or later. No third-party packages, installation step, or build i
 | `lesson.md` | Obsidian lesson with collapsed answer callouts. |
 | `lesson.json` | Copy of the lesson content used to create the previews. |
 
-Use `--lesson /path/to/lesson.json` to select a JSON input and run its mechanical checks. Use `--date YYYY-MM-DD` to select an existing **ready** lesson from SQLite. For example, after a lesson has been generated and saved:
+Both commands accept one input selector:
+
+| Input | Checks performed |
+| --- | --- |
+| Neither selector | Bundled sample structure and its known first-day assignment; production history and linguistic review remain unchecked. |
+| `--date YYYY-MM-DD` | An existing ready lesson is rechecked against its saved assignment and prior published history. |
+| `--lesson /path/lesson.json` | Standalone structure, supported theme/format mix, ruby, ordering, and local uniqueness. Add explicit `--config` or `--db` to check a saved assignment and published history; that database and the file date's assignment must already exist. |
+
+For example, after a lesson has been generated and saved:
 
 ```sh
 python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09 --output /tmp/n1-saved-lesson
 ```
 
-The selected date must already have a ready record; `preview` does not generate missing content. If both `--date` and `--lesson` are supplied, `--date` takes precedence. Neither private file is needed for the bundled sample; saved content needs its database location through `--config`, `--db`, or the default path.
+Supplying both `--date` and `--lesson` is an argument error. Neither command generates content, performs an LLM review, or marks a lesson ready. Saved content needs its database location through `--config`, `--db`, or the default path. Saved previews, validation, and `status` open SQLite read-only, leave file permissions intact, and do not recover or interfere with an active send.
+
+Exit codes are `0` for success or routine waiting/ready/completed outcomes, `1` for failed checks or recorded generation/delivery failures, and `2` for input, configuration, storage, or overlapping-run errors.
 
 `--output` overrides the configured `preview_path`. If neither is supplied, files go into `n1-daily-preview` under the operating system's temporary directory. Output directories inside a configured vault, an identifiable Obsidian vault, iCloud, or a launchd job directory are rejected.
 
@@ -44,7 +55,7 @@ Copy `config.example.json` and `secrets.example.json` into a private directory o
 
 Pass paths explicitly with `--config` and `--secrets`. The application reads JSON directly and passes credentials to service clients in memory. Application environment variables and dotenv files are no longer supported. Private files are never discovered automatically. The [configuration table](n1-daily-email-design.md#configuration-and-secrets) defines each field, its requirements, default, and an example.
 
-Set `llm_endpoint`, `generation_model`, and `review_model` in `config.json`, and `llm_api_key` in `secrets.json`. The endpoint must accept `messages` and `response_format: {"type":"json_object"}`, and return JSON text in `choices[0].message.content`. Providers with another protocol need a separate adapter. All service requests use a finite configurable timeout.
+Set `llm_endpoint`, `generation_model`, and `review_model` in `config.json`, and `llm_api_key` in `secrets.json`. The endpoint needs an HTTPS host and path, with no userinfo, query string, or fragment. Authentication uses the request header. It must accept `messages` and `response_format: {"type":"json_object"}`, and return JSON text in `choices[0].message.content`. Providers with another protocol need a separately reviewed adapter. All service requests use a finite configurable timeout.
 
 ```sh
 python3 -m n1_daily generate --config /path/to/config.json --secrets /path/to/secrets.json
@@ -52,19 +63,22 @@ python3 -m n1_daily status --config /path/to/config.json
 python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09
 ```
 
-`generate` saves content and its matching structured review before readiness. `preview --date` renders a saved ready lesson without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
+Run `generate` for today's Asia/Hong_Kong date between `generate_time` and `cutoff_time`, inclusive (defaults 07:45–12:00). Past/future dates and calls outside that window are rejected before creating a lesson or contacting a model. It saves content and its matching structured review before readiness. `preview --date` can inspect a saved ready lesson from any date without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
 
-`--config` is required for `generate`, `publish`, `daily`, and `schedule`. Sample previews work without either private file. Secrets are loaded only when generation, review, or an unfinished Gmail send requires them. Saved ready lessons and completed channels remain usable without LLM credentials; vault delivery needs no secret file. Missing or invalid email credentials produce a definite channel failure, allowing vault delivery to continue.
+`--config` is required for `generate`, `publish`, `daily`, and `schedule`. Sample previews work without either private file. Secrets are loaded only when generation, review, or an unfinished Gmail send requires them. Saved ready lessons and completed channels remain usable without LLM credentials; vault delivery needs no secret file. Channel setup failures are independent: invalid email credentials allow vault delivery, and a missing/unwritable vault allows email delivery. Completed channels do not require their service settings.
+
+Missing LLM settings or unusable secrets produce a recorded, notified generation failure that can resume after configuration is repaired. The first draft request sets `attempt_count` to 1; setup failure beforehand leaves it at 0. Unchanged repeated daily failures do not repeat the notification.
 
 Relative data paths are resolved against the configuration file's directory; `~` expands to the user's home directory. CLI overrides take precedence and resolve relative paths against the working directory. The example omits `preview_path` to use the operating system's temporary directory. Malformed JSON, duplicate/unknown keys, incorrect types, and misplaced credentials fail with field-specific diagnostics that omit values.
 
 ## Implementation choices
 
 - Python's standard library supplies SQLite, Unicode processing, MIME email, HTTP, tests, and macOS file locking. Modules separate content checks, rendering, persistence, generation, and delivery.
-- The first three slots cover kanji, vocabulary, and grammar. Paraphrase, usage, and reading-comprehension slots use vocabulary targets; ordering uses grammar targets. Themes and format rotation advance once on first publication. Due reviews fill compatible slots, with a daily cap of two.
+- The first three slots cover kanji, vocabulary, and grammar. Paraphrase, usage, and reading-comprehension slots use vocabulary targets; ordering uses grammar targets. Themes and format rotation advance once on first publication. Due reviews fill compatible slots, with a daily cap of two; ties use question ID, then original lesson ID.
+- Published lessons supply teaching history. Failed drafts remain available for diagnostics and do not reserve targets or wording. Malformed published entries produce date/field diagnostics while usable questions remain available.
 - Ruby ranges use NFC text and half-open Unicode code-point offsets. `distractors_ja.B` identifies a distractor field. Markdown uses inline ruby by default; `"ruby_mode": "parentheses"` or `--ruby-mode parentheses` provides the answer-only hiragana fallback.
-- A persisted generation phase resumes an interrupted request or review. One corrected draft is allowed; exhausted quality failures remain failed across restarts. Transport failures remain retryable in the publication window. Complete drafts and verdicts are saved before delivery.
-- Each channel retains its own result. Email bytes and a `sending` marker are committed before Gmail contact. Interrupted sends become `unknown`; definite rejection is retryable. Saved bytes are reused. SQLite transactions record first publication and review exposure together.
+- A persisted generation phase resumes an interrupted request or review. One corrected draft is allowed; exhausted quality failures remain failed across restarts. Truncated HTTP responses and transport failures remain retryable in the window. Failed reviews require concrete offending text and a requested change. Complete drafts and verdicts are saved before delivery.
+- Each channel retains its own result. Email bytes and a `sending` marker are committed before Gmail contact. Interrupted sends become `unknown`; definite rejection and pre-send OAuth failures are retryable. Saved bytes are reused. SQLite records observed acceptance/write-completion time and review exposure in one transaction.
 - Markdown files and the index use atomic replacement with persisted checksums. Unexpected edits are preserved and reported. A pending checksum permits recovery after a completed write interrupted before status recording. Personal notes are never created or modified.
 
 ## Delivery and scheduling after activation
@@ -74,6 +88,8 @@ Gmail configuration requires one sender, one recipient, OAuth client credentials
 Set `vault_path` to the vault created with Obsidian's iCloud option. Set `sender`, `recipient`, and `google_client_id` in `config.json`, and `google_client_secret` and `google_refresh_token` in `secrets.json` for Gmail delivery. Activated publication writes `Lessons/YYYY/MM/YYYY-MM-DD.md` and `Index.md`, with a link to `Notes/YYYY-MM-DD.md` for your own notes.
 
 After an explicit activation request, `publish --activate-email --activate-vault` sends today's saved ready lesson during the publication window; either flag can activate one channel. `daily` accepts the same flags and generates only when needed. It uses Asia/Hong_Kong, defaults to generation from 07:45, publication from 08:00, and a noon cutoff. It skips completed channels and never sends a backlog.
+
+Each new channel or index attempt must start by cutoff. An attempt already underway may finish afterward and retains its actual result. After cutoff, a day with no successful channel is missed; one with a successful channel and unfinished delivery is partial. Both close without automatic backlog delivery or repeated daily notifications. Completed days stay complete.
 
 Export a reviewable, inactive [launchd](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) job:
 
@@ -87,7 +103,9 @@ For `unknown` email outcomes, inspect the sending mailbox. `resolve-email --date
 
 ## Validation before daily use
 
-Tests cover malformed content and ruby, ambiguous/incomplete reviews, correction limits, outages, independent channel retries, crash recovery, review dates, duplicate runs, timing, and edited-file conflicts. Configuration tests cover defaults, overrides, permissions, ownership, secret isolation, and credential-free reuse of saved lessons. Temporary directories and fake services keep tests offline.
+Tests cover malformed content/history/ruby, ambiguous/incomplete reviews, correction limits, truncated responses, independent channel setup/retries, crash recovery, review dates/ties, unknown-email resolution, duplicate runs, actual completion times, cutoff behavior, and edited-file conflicts. Configuration and CLI tests cover defaults, overrides, permissions, ownership, secret isolation, read-only access, input conflicts, validation scope, and date/window restrictions. Temporary directories and fake services keep tests offline. See the [reconciliation follow-up](spec-reconciliation.md#approved-reconciliation-follow-up) for the findings and regression evidence.
+
+A static prose review found the sample's English and traditional-script Cantonese supplements readable. The ordering explanation was made specific about what `にもまして` compares in this sentence. Several questions use clear contrasts between distractors, so the sample's N1 difficulty and 12-minute estimate still need your assessment. This review does not replace the automated linguistic gate or actual-provider acceptance tests.
 
 The user ran `python3 -m n1_daily preview --output /tmp/n1-daily-preview` and confirmed correct example-lesson rendering in these local previews:
 

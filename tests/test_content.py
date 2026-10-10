@@ -72,7 +72,9 @@ class ContentTests(unittest.TestCase):
         self.assertEqual([], check_lesson(self.lesson, self.assignment, history))
 
     def test_history_blocks_new_targets_and_duplicate_wording(self):
-        self.assertTrue(any("target" in e for e in check_lesson(self.lesson, self.assignment, [sample()])))
+        old = sample()
+        old["first_published_at"] = "2026-10-08T08:00:00+08:00"
+        self.assertTrue(any("target" in e for e in check_lesson(self.lesson, self.assignment, [old])))
 
     def test_assignment_and_review_reference_must_match(self):
         self.lesson["questions"][0]["review_of"] = {"lesson_id": "missing", "question_id": "q1"}

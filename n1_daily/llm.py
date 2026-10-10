@@ -1,10 +1,11 @@
 """A configurable JSON chat endpoint with explicit history on every call."""
 
 import json
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlparse
 
+from .config import valid_endpoint
 from .content import CRITERIA
 from .services import InvalidResponse, ServiceUnavailable, post_json
 
@@ -30,9 +31,8 @@ or the reconstructed sentence in prompt_ja. Return one complete JSON object.
 
 class JsonModel:
     def __init__(self, endpoint, api_key, generation_model, review_model, timeout=30):
-        parsed = urlparse(endpoint)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError("llm_endpoint must be an HTTPS URL without embedded credentials")
+        if not valid_endpoint(endpoint):
+            raise ValueError("llm_endpoint must have an HTTPS host and path without userinfo, query, or fragment")
         if not all((api_key, generation_model, review_model)):
             raise ValueError("Configure LLM API key and both model names")
         self.endpoint, self.api_key = endpoint, api_key
@@ -47,7 +47,7 @@ class JsonModel:
         except HTTPError as error:
             error.close()
             raise ServiceUnavailable(f"LLM request failed: HTTP {error.code}") from error
-        except OSError as error:
+        except (OSError, HTTPException) as error:
             raise ServiceUnavailable("LLM request timed out or lost its connection") from error
         except ValueError as error:
             raise InvalidResponse("LLM returned an unreadable response") from error

@@ -5,6 +5,7 @@ from datetime import date, datetime
 import json
 from pathlib import Path
 import plistlib
+import sqlite3
 import subprocess
 import sys
 from zoneinfo import ZoneInfo
@@ -16,7 +17,11 @@ from .llm import JsonModel
 from .render import message_bytes, render_html, render_markdown, render_text
 from .services import DefiniteFailure, GmailSender
 from .store import Store, run_lock
-from .workflow import daily, deliver, generate
+from .workflow import close_window, daily, deliver, generate
+
+
+class ContentCheckFailure(ValueError):
+    """Checks ran and rejected content; distinct from an input error."""
 
 
 def parser():
@@ -27,10 +32,12 @@ def parser():
         command.add_argument("--config", type=Path, help="explicit path to config.json")
         command.add_argument("--secrets", type=Path, help="explicit path to private secrets.json; loaded only for service requests")
         command.add_argument("--db", type=Path)
-        if name not in ("schedule", "daily"):
-            command.add_argument("--date", type=date.fromisoformat)
         if name in ("preview", "validate"):
-            command.add_argument("--lesson", type=Path)
+            input_choice = command.add_mutually_exclusive_group()
+            input_choice.add_argument("--date", type=date.fromisoformat)
+            input_choice.add_argument("--lesson", type=Path)
+        elif name not in ("schedule", "daily"):
+            command.add_argument("--date", type=date.fromisoformat)
         if name in ("preview", "schedule"):
             command.add_argument("--output", type=Path)
         if name in ("preview", "publish", "daily"):
@@ -78,6 +85,9 @@ class ConfiguredModel:
     def review(self, lesson, context):
         return self.client().review(lesson, context)
 
+    def prepare(self):
+        self.client()
+
 
 class ConfiguredSender:
     def __init__(self, config, secrets):
@@ -106,32 +116,54 @@ def channels(args, config, secrets):
     if args.activate_email:
         sender = ConfiguredSender(config, secrets)
     if args.activate_vault:
-        if not config.vault_path:
-            raise ConfigError(config.source, "vault_path", "required before activating vault writes")
         vault = config.vault_path
     return sender, vault
 
 
 def preview_lesson(args, config):
-    if args.date:
+    def checked(lesson, assignment=None, history=None):
+        errors = check_lesson(lesson, assignment, history)
+        if errors:
+            raise ContentCheckFailure("\n".join(errors))
+
+    def read_record(day, require_ready):
         config.check_database_path()
-        if not config.db_path.exists():
-            raise ValueError("No saved lesson database exists")
-        store = Store(config.db_path)
+        store = Store(config.db_path, readonly=True)
         try:
-            record = store.get(args.date.isoformat())
-            if not record or record["status"] != "ready":
-                raise ValueError("The requested date has no saved ready lesson")
-            return record["lesson"]
+            record = store.get(day)
+            if not record or (require_ready and record["status"] != "ready"):
+                raise ValueError("The requested date has no saved ready lesson" if require_ready else "No saved assignment for the input date")
+            return record, store.history(before=day, published_only=True)
         finally:
             store.close()
+
+    full_scope = "All mechanical checks passed against the saved assignment and prior published history; linguistic review is still required"
+    if args.date:
+        record, history = read_record(args.date.isoformat(), True)
+        checked(record["lesson"], record["assignment"], history)
+        return record["lesson"], full_scope
+
     path = args.lesson or Path(__file__).parents[1] / "examples/sample-lesson.json"
-    lesson = json.loads(path.read_text())
-    assignment = sample_assignment(lesson.get("date", "")) if isinstance(lesson, dict) else sample_assignment("")
-    errors = check_lesson(lesson, assignment, [])
-    if errors:
-        raise ValueError("\n".join(errors))
-    return lesson
+
+    def unique_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Lesson JSON contains duplicate keys")
+            result[key] = value
+        return result
+
+    lesson = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
+    if not args.lesson:
+        assignment = sample_assignment(lesson.get("date", "")) if isinstance(lesson, dict) else sample_assignment("")
+        checked(lesson, assignment)
+        return lesson, "Sample structure and assignment checks passed; production-history checks and LLM review were not performed"
+    checked(lesson)
+    if args.config or args.db:
+        record, history = read_record(lesson["date"], False)
+        checked(lesson, record["assignment"], history)
+        return lesson, full_scope
+    return lesson, "Local structure checks passed; assignment/history checks and LLM review were not performed"
 
 
 def export_schedule(args, config):
@@ -168,9 +200,9 @@ def main(arguments=None):
             return 0
         ruby_mode = getattr(args, "ruby_mode", None) or config.ruby_mode
         if args.command in ("preview", "validate"):
-            lesson = preview_lesson(args, config)
+            lesson, scope = preview_lesson(args, config)
             if args.command == "validate":
-                print("Mechanical content checks passed; linguistic review is still required")
+                print(scope)
                 return 0
             output = (args.output or config.preview_path).expanduser().resolve()
             config.check_preview_path(output)
@@ -179,24 +211,31 @@ def main(arguments=None):
             for name, text in outputs.items():
                 atomic_write(output / name, text.encode("utf-8"))
             atomic_write(output / "lesson.eml", message_bytes(lesson, config.sender or "preview@example.test", config.recipient or "reader@example.test"))
-            print(f"Preview: {output}\nEmail: lesson.html / lesson.eml\nObsidian: lesson.md\nNo email was sent; the configured vault was untouched")
+            print(f"{scope}\nPreview: {output}\nEmail: lesson.html / lesson.eml\nObsidian: lesson.md\nNo email was sent; the configured vault was untouched")
             return 0
         sender, vault = channels(args, config, secrets) if args.command in ("publish", "daily") else (None, None)
         config.check_database_path()
         now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
         day = (getattr(args, "date", None) or now.date()).isoformat()
+        if args.command == "generate" and (day != now.date().isoformat() or not config.generate_time <= now.time() <= config.cutoff_time):
+            raise ValueError("Generation is limited to today between generate_time and cutoff_time")
         if args.command == "publish" and (day != now.date().isoformat() or not config.publish_time <= now.time() <= config.cutoff_time):
             raise ValueError("Publication is limited to today's configured window; use preview to view another date")
+        if args.command == "status":
+            store = Store(config.db_path, readonly=True)
+            try:
+                record = store.get(day)
+                if not record:
+                    raise ValueError("No lesson record for this date")
+                print(json.dumps({k: record[k] for k in ("date", "status", "attempt_count", "first_published_at", "failure_reasons", "email_status", "email_error", "markdown_status", "markdown_error", "index_status", "index_error")}, ensure_ascii=False, indent=2))
+            finally:
+                store.close()
+            return 0
         with run_lock(config.db_path):
             store = Store(config.db_path)
             try:
                 store.recover_inflight()
-                if args.command == "status":
-                    record = store.get(day)
-                    if not record:
-                        raise ValueError("No lesson record for this date")
-                    print(json.dumps({k: record[k] for k in ("date", "status", "attempt_count", "first_published_at", "failure_reasons", "email_status", "email_error", "markdown_status", "markdown_error", "index_status", "index_error")}, ensure_ascii=False, indent=2))
-                elif args.command == "generate":
+                if args.command == "generate":
                     existing = store.get(day)
                     model = None if existing and (existing["status"] == "ready" or existing["phase"] == "failed") else ConfiguredModel(config, secrets)
                     record = generate(store, day, model)
@@ -205,9 +244,14 @@ def main(arguments=None):
                         notification("Lesson generation failed; inspect the recorded reasons with status")
                         return 1
                 elif args.command == "publish":
-                    record = deliver(store, day, sender, vault, config.sender, config.recipient, now, ruby_mode)
+                    current_time = lambda: datetime.now(ZoneInfo("Asia/Hong_Kong"))
+                    record = deliver(store, day, sender, vault, config.sender, config.recipient, now, ruby_mode,
+                                     current_time=current_time, cutoff=config.cutoff_time, vault_requested=args.activate_vault)
                     print(f"{day}: email={record['email_status']}, Markdown={record['markdown_status']}, index={record['index_status']}")
-                    if (sender and record["email_status"] != "sent") or (vault and (record["markdown_status"] != "written" or record["index_status"] != "written")):
+                    if (sender and record["email_status"] != "sent") or (args.activate_vault and (record["markdown_status"] != "written" or record["index_status"] != "written")):
+                        after = current_time()
+                        if after.date() != now.date() or after.time() > config.cutoff_time:
+                            close_window(store, day, sender, args.activate_vault)
                         notification("Lesson delivery remains incomplete; inspect status before retrying")
                         return 1
                 elif args.command == "daily":
@@ -218,9 +262,9 @@ def main(arguments=None):
                     model = ConfiguredModel(config, secrets) if needs_generation else None
                     outcome = daily(store, model, sender, vault, config.sender, config.recipient, now,
                                     config.generate_time, config.publish_time, config.cutoff_time, ruby_mode,
-                                    current_time=lambda: datetime.now(ZoneInfo("Asia/Hong_Kong")))
+                                    current_time=lambda: datetime.now(ZoneInfo("Asia/Hong_Kong")), vault_requested=args.activate_vault)
                     print(f"{day}: {outcome}")
-                    if outcome in ("failed", "missed"):
+                    if outcome in ("failed", "missed", "partial"):
                         current = store.get(day)
                         issue_fields = ("status", "failure_reasons", "email_status", "email_error", "markdown_status", "markdown_error", "index_status", "index_error")
                         if not existing or any(existing[field] != current[field] for field in issue_fields):
@@ -235,6 +279,8 @@ def main(arguments=None):
                     if args.retry:
                         store.update(day, email_status="failed", email_error="Operator authorized retry after mailbox check")
                     else:
+                        if not args.accepted_id.strip():
+                            raise ValueError("Provide a nonempty Gmail message ID")
                         if not args.accepted_at or args.accepted_at.tzinfo is None:
                             raise ValueError("Provide the actual timezone-aware Gmail acceptance time with --accepted-at")
                         store.channel_success(day, args.accepted_at.astimezone(ZoneInfo("Asia/Hong_Kong")), email_status="sent", gmail_id=args.accepted_id, email_error=None)
@@ -242,6 +288,12 @@ def main(arguments=None):
             finally:
                 store.close()
         return 0
+    except ContentCheckFailure as error:
+        print(f"Content checks failed: {error}", file=sys.stderr)
+        return 1
+    except sqlite3.Error:
+        print("Error: SQLite storage is unavailable or corrupt", file=sys.stderr)
+        return 2
     except (OSError, ValueError, RuntimeError, KeyError) as error:
         print(f"Error: {error}", file=sys.stderr)
         return 2

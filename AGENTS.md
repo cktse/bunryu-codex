@@ -8,6 +8,8 @@ Chat requests proposing system changes must first become specification updates. 
 
 Choose straightforward implementation details within approved scope and record them in `README.md`. Ask clarification questions only when a decision materially changes the requirements. Before reporting completion, check the diff against approved scope and disclose any deviations.
 
+Keep requirements, approval status, and later validation evidence in `n1-daily-email-design.md`. Preserve `docs/history/` as the archive of previous specifications and the one-off reconciliation audit; do not extend those historical documents for later changes.
+
 ## Project Structure & Module Organization
 
 Modules live in `n1_daily/`, tests in `tests/`, and the complete sample lesson in `examples/`. SQLite lesson JSON is authoritative; email and Obsidian notes are derived outputs. Keep generation and review separate from rendering and delivery so ready lessons remain usable without LLM access.

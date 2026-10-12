@@ -1,203 +1,244 @@
-"""Persist generation progress; deliver only saved ready content."""
-
-from datetime import time
+"""Generation checkpoints and independent publication channels."""
+from datetime import datetime
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import ConfigError
-from .content import check_lesson, check_review
-from .files import write_generated
-from .render import message_bytes, render_markdown
-from .services import DefiniteFailure, InvalidResponse, ServiceUnavailable
+from .content import canonical, check_lesson, check_review, fingerprint
+from .errors import DeliveryError, InputError, ModelOutputError, ServiceError, StorageError
+from .files import confined, index_text, lesson_path, write_file
+from .http import sanitize
+from .render import email_message, render_markdown
+
+TZ = ZoneInfo('Asia/Hong_Kong')
+
+
+def clock():
+    return datetime.now(TZ)
+
+
+def safe_error(error, service=None):
+    secrets = getattr(service, 'secrets', None)
+    return sanitize(str(error), secrets.redactions() if secrets else ())
+
+
+def review_binding(record, report):
+    context = {'generation': record['context'], 'review_stages': record['review_stages']}
+    return fingerprint(record['lesson'], record['assignment'], context, report)
+
+
+def content_decision(store, record, reasons, **results):
+    """Commit a completed content decision together with its next phase."""
+    if not reasons:
+        results.update(status='ready', phase='ready', failure_reasons=[], correction_feedback=[])
+        report = results.get('review_result', record['review_result'])
+        results['binding'] = review_binding(record, report)
+    elif record['attempt_count'] < 2:
+        results.update(status='draft', phase='generating', attempt_count=2,
+                       failure_reasons=reasons, correction_feedback=reasons, binding=None)
+    else:
+        results.update(status='failed', phase='failed', failure_reasons=reasons, correction_feedback=reasons)
+    store.update(record['date'], **results)
 
 
 def generate(store, day, model):
-    record = store.get(day) or store.begin(day, store.assignment(day))
-    if record["status"] == "ready" or record["phase"] == "failed":
-        return record
-    if model is None:
-        raise ValueError("LLM configuration is required to generate an unsaved lesson")
-    context = store.context(day, record["assignment"])
-    history = store.history(before=day, published_only=True)
-    while True:
+    record = store.ensure(day)
+    while record['phase'] not in ('ready', 'failed') and record['status'] not in ('missed', 'partial'):
+        phase = record['phase']
+        if phase not in ('generating', 'checking', 'reviewing'):
+            raise InputError(f'Stored {day}.phase is unsupported')
+        if phase == 'checking':
+            reasons = record['check_result'] or check_lesson(record['lesson'], record['assignment'], record['context']['history'])
+            if reasons:
+                content_decision(store, record, reasons)
+            else:
+                store.update(day, phase='reviewing', status='draft', check_result=[])
+        else:
+            try:
+                if hasattr(model, 'prepare'):
+                    model.prepare(phase)
+                if phase == 'generating':
+                    if record['attempt_count'] == 0:
+                        store.update(day, attempt_count=1)
+                    try:
+                        draft = model.draft(record['context'], record['correction_feedback'], record['lesson'])
+                        draft = canonical(draft) if isinstance(draft, dict) else draft
+                        if isinstance(draft, dict):
+                            draft.update(generation_model=model.generation_model, review_model=model.review_model, prompt_version='v2')
+                        problems = check_lesson(draft, record['assignment'], record['context']['history'])
+                    except ModelOutputError as exc:
+                        draft, problems = None, [safe_error(exc, model)]
+                    store.update(day, lesson=draft, check_result=problems, phase='checking', status='draft',
+                                 review_result=None, binding=None)
+                else:
+                    try:
+                        report = model.review(record['lesson'], record['context'])
+                        reasons = check_review(record['lesson'], report)
+                    except ModelOutputError as exc:
+                        report, reasons = None, [safe_error(exc, model)]
+                    # Review and its decision are one transaction: no completed review is replayed.
+                    content_decision(store, record, reasons, review_result=report)
+            except StorageError:
+                raise
+            except (ServiceError, InputError) as exc:
+                store.update(day, status='failed', failure_reasons=[safe_error(exc, model)])
+                break
         record = store.get(day)
-        errors = None
-        try:
-            if record["phase"] == "generating":
-                if hasattr(model, "prepare"):
-                    model.prepare()
-                if record["attempt_count"] == 0:
-                    store.update(day, attempt_count=1)
-                    record = store.get(day)
-                try:
-                    draft = model.draft(context, record["correction_feedback"], record["lesson"])
-                except InvalidResponse as error:
-                    draft = None
-                    errors = [f"lesson: {error}"]
-                if isinstance(draft, dict):
-                    draft.update(generation_model=model.generation_model, review_model=model.review_model, prompt_version="v1")
-                store.update(day, lesson=draft, review_result=None, status="draft", phase="checking")
-                record = store.get(day)
-            if record["phase"] == "checking":
-                errors = errors or check_lesson(record["lesson"], record["assignment"], history)
-                if not errors:
-                    store.update(day, phase="reviewing")
-                    record = store.get(day)
-            if record["phase"] == "reviewing":
-                if hasattr(model, "prepare"):
-                    model.prepare()
-                try:
-                    review = model.review(record["lesson"], context)
-                    errors = check_review(record["lesson"], review)
-                except InvalidResponse as error:
-                    review, errors = None, [f"review: {error}"]
-                store.update(day, review_result=review)
-                if not errors:
-                    lesson = record["lesson"]
-                    lesson.update(review_model=model.review_model, prompt_version="v1")
-                    store.update(day, lesson=lesson, status="ready", phase="ready", failure_reasons=[])
-                    return store.get(day)
-        except ConfigError as error:
-            store.update(day, status="failed", failure_reasons=[f"Model configuration unavailable: {error}"])
-            return store.get(day)
-        except (ServiceUnavailable, OSError) as error:
-            reason = str(error) if isinstance(error, ServiceUnavailable) else "Request timed out or connection lost"
-            store.update(day, status="failed", failure_reasons=[f"Model unavailable: {reason}"])
-            return store.get(day)
-        if errors:
-            if record["attempt_count"] >= 2:
-                store.update(day, status="failed", phase="failed", failure_reasons=errors)
-                return store.get(day)
-            store.update(day, attempt_count=2, status="draft", phase="generating", failure_reasons=errors, correction_feedback=errors)
-
-
-def publication_complete(record, sender, vault_requested):
-    return (bool(record["first_published_at"]) and (not sender or record["email_status"] == "sent")
-            and (not vault_requested or (record["markdown_status"] == "written" and record["index_status"] == "written")))
-
-
-def close_window(store, day, sender, vault_requested):
-    record = store.get(day) or store.begin(day, store.assignment(day))
-    if publication_complete(record, sender, vault_requested):
-        return "published"
-    outcome = "partial" if record["first_published_at"] else "missed"
-    reason = ("Partial publication; unfinished delivery window closed; no backlog will be sent" if outcome == "partial"
-              else "Missed publication window; no backlog will be sent")
-    if reason in record["failure_reasons"]:
-        return "closed"
-    values = {"failure_reasons": record["failure_reasons"] + [reason]}
-    if record["status"] != "ready":
-        values.update(status="failed", phase="failed")
-    store.update(day, **values)
-    return outcome
-
-
-def deliver(store, day, sender, vault, from_address, recipient, now, ruby_mode="html",
-            current_time=None, cutoff=None, vault_requested=None):
-    record = store.get(day)
-    if not record or record["status"] != "ready":
-        raise ValueError("delivery requires a saved ready lesson")
-    lesson = record["lesson"]
-    vault_requested = bool(vault) if vault_requested is None else vault_requested
-    def clock():
-        return (current_time() if current_time else now).astimezone(ZoneInfo("Asia/Hong_Kong"))
-
-    def allowed(moment):
-        return cutoff is None or (moment.date().isoformat() == day and moment.time() <= cutoff)
-
-    if sender and record["email_status"] in ("pending", "failed"):
-        attempted_at = clock()
-        if not allowed(attempted_at):
-            return record
-        sending = False
-        try:
-            # Local credential failures are definite failures. Validate before
-            # recording a send in progress; other channels remain available.
-            if hasattr(sender, "prepare"):
-                sender.prepare()
-            payload = record["message_bytes"] or message_bytes(lesson, from_address, recipient)
-            # Commit outgoing bytes and intent before making a remote request.
-            store.update(day, message_bytes=payload, email_status="sending", email_attempt_at=attempted_at.isoformat(), email_error=None)
-            sending = True
-            message_id = sender.send(payload)
-            if not message_id:
-                raise ValueError("Gmail returned no message ID")
-        except DefiniteFailure as error:
-            store.update(day, email_status="failed", email_attempt_at=attempted_at.isoformat(), email_error=str(error))
-        except Exception:
-            # Unexpected failures during send are also uncertain. An operator
-            # must inspect the mailbox before authorizing a resend.
-            store.update(day, email_status="unknown" if sending else "failed", email_attempt_at=attempted_at.isoformat(),
-                         email_error="Email outcome unknown; check the sending mailbox" if sending else "Email preparation failed before sending")
-        else:
-            store.channel_success(day, clock(), email_status="sent", gmail_id=message_id, email_error=None)
-    record = store.get(day)
-    if vault_requested and record["markdown_status"] != "written":
-        attempted_at = clock()
-        if not allowed(attempted_at):
-            return record
-        store.update(day, markdown_attempt_at=attempted_at.isoformat())
-        try:
-            if not vault:
-                raise ValueError("vault_path: required before activating vault writes")
-            vault = Path(vault).expanduser().resolve()
-            path = vault / "Lessons" / day[:4] / day[5:7] / f"{day}.md"
-            store.update(day, markdown_path=str(path))
-            digest = write_generated(store, path, render_markdown(lesson, ruby_mode))
-        except (OSError, ValueError) as error:
-            store.update(day, markdown_status="failed", markdown_error=str(error))
-        else:
-            store.channel_success(day, clock(), markdown_status="written", markdown_checksum=digest, markdown_error=None)
-    record = store.get(day)
-    if vault_requested and record["markdown_status"] == "written" and record["index_status"] != "written":
-        if not allowed(clock()):
-            return record
-        # The index includes only lessons actually written, even when an email
-        # alone has already established publication for another date.
-        try:
-            if not vault:
-                raise ValueError("vault_path: required before activating vault writes")
-            vault = Path(vault).expanduser().resolve()
-            rows = store.conn.execute("SELECT date FROM lessons WHERE markdown_status='written' ORDER BY date DESC")
-            lines = ["# JLPT N1 Lessons", ""]
-            for row in rows:
-                old = store.get(row["date"])["lesson"]
-                d = old["date"]
-                lines.append(f"- [[Lessons/{d[:4]}/{d[5:7]}/{d}|{d} · {old['theme']}]]")
-            write_generated(store, vault / "Index.md", "\n".join(lines) + "\n")
-        except (OSError, ValueError) as error:
-            store.update(day, index_status="failed", index_error=str(error))
-        else:
-            store.update(day, index_status="written", index_error=None)
     return store.get(day)
 
 
-def daily(store, model, sender, vault, from_address, recipient, now,
-          generation_time=time(7, 45), publication_time=time(8), cutoff=time(12), ruby_mode="html", current_time=None,
-          vault_requested=None):
-    vault_requested = bool(vault) if vault_requested is None else vault_requested
-    day = now.date().isoformat()
-    clock = now.time().replace(tzinfo=None)
-    if clock < generation_time:
-        return "waiting"
-    if clock > cutoff:
-        return close_window(store, day, sender, vault_requested)
-    record = generate(store, day, model)
-    if record["status"] != "ready":
-        return "failed"
-    publication_now = current_time() if current_time else now
-    publication_clock = publication_now.time().replace(tzinfo=None)
-    if publication_now.date() != now.date() or publication_clock > cutoff:
-        return close_window(store, day, sender, vault_requested)
-    if publication_clock < publication_time:
-        return "ready"
-    record = deliver(store, day, sender, vault, from_address, recipient, publication_now, ruby_mode,
-                     current_time=current_time, cutoff=cutoff, vault_requested=vault_requested)
-    after = current_time() if current_time else publication_now
-    if after.date() != now.date() or after.time().replace(tzinfo=None) > cutoff:
-        return close_window(store, day, sender, vault_requested)
-    if sender and record["email_status"] != "sent":
-        return "failed"
-    if vault_requested and (record["markdown_status"] != "written" or record["index_status"] != "written"):
-        return "failed"
-    return "published" if record["first_published_at"] else "ready"
+def publication_checks(store, record):
+    record = store.ensure_context(record)
+    if record['phase'] != 'ready':
+        return ['Lesson is not ready for publication']
+    reasons = check_lesson(record['lesson'], record['assignment'], record['context']['history'])
+    if not reasons:
+        reasons += check_review(record['lesson'], record['review_result'])
+    if reasons:
+        return reasons
+    binding = review_binding(record, record['review_result'])
+    if record['binding'] and record['binding'] != binding:
+        return ['Saved content/review binding mismatch; inspect the lesson and database edits']
+    if not record['binding']:
+        # Legacy baseline establishes integrity from this point, not before migration.
+        store.update(record['date'], binding=binding)
+    if not record['first_published_at']:
+        reasons += check_lesson(record['lesson'], record['assignment'], store.history(record['date']))
+        reasons += store.stale_reviews(record)
+    return reasons
+
+
+def send_email(store, record, config, sender, now):
+    day = record['date']
+    if record['email_status'] in ('unknown', 'sending'):
+        return
+    try:
+        config.require('sender', 'recipient')
+        message = record['message_bytes']
+        if message:
+            parsed = BytesParser(policy=policy.default).parsebytes(message)
+            saved_from, saved_to = record['email_from'] or str(parsed['From']), record['email_to'] or str(parsed['To'])
+            if (saved_from != config.sender or saved_to != config.recipient
+                    or str(parsed['From']) != saved_from or str(parsed['To']) != saved_to):
+                raise InputError('Saved email sender/recipient differs from configuration; restore the frozen destination')
+        else:
+            message = email_message(record['lesson'], config.sender, config.recipient, now=now())
+            store.update(day, message_bytes=message, email_from=config.sender, email_to=config.recipient)
+        sender.prepare()
+    except StorageError:
+        raise
+    except (InputError, ServiceError, OSError) as exc:
+        store.update(day, email_status='failed', email_error=safe_error(exc, sender))
+        return
+    store.update(day, email_status='sending', email_attempt_at=now().isoformat(), email_error=None)
+    try:
+        identity = sender.send(message)
+        if not isinstance(identity, str) or not identity.strip():
+            raise DeliveryError('Gmail acceptance has no message ID', uncertain=True)
+    except Exception as exc:
+        uncertain = not isinstance(exc, DeliveryError) or exc.uncertain
+        store.update(day, email_status='unknown' if uncertain else 'failed', email_error=safe_error(exc, sender))
+        return
+    completed = now()
+    store.channel_success(day, completed, email_status='sent', gmail_id=identity,
+                          email_completed_at=completed.isoformat(), email_error=None)
+
+
+def write_vault(store, record, config, now):
+    day = record['date']
+    field = 'markdown_error' if record['markdown_status'] != 'written' else 'index_error'
+    try:
+        config.require('vault_path')
+        root = Path(config.vault_path).expanduser().resolve()
+        if not root.is_dir():
+            raise InputError(f'Vault root must already exist as a directory: {root}')
+        path = lesson_path(root, day)
+        if (record['vault_root'] and record['vault_root'] != str(root)) or (record['markdown_path'] and record['markdown_path'] != str(path)):
+            raise InputError('Vault destination changed for unfinished lesson/index work')
+        confined(root, path)
+        confined(root, root / 'Index.md')
+        store.update(day, vault_root=str(root), markdown_path=str(path))
+        if record['markdown_status'] != 'written':
+            store.update(day, markdown_attempt_at=now().isoformat())
+            checksum = write_file(store, root, path, render_markdown(record['lesson'], config.ruby_mode))
+            completed = now()
+            store.channel_success(day, completed, markdown_status='written', markdown_checksum=checksum,
+                                  markdown_completed_at=completed.isoformat(), markdown_error=None)
+        field = 'index_error'
+        if record['index_status'] != 'written':
+            store.update(day, index_attempt_at=now().isoformat())
+            write_file(store, root, root / 'Index.md', index_text(store, root))
+            store.update(day, index_status='written', index_completed_at=now().isoformat(), index_error=None)
+    except StorageError:
+        raise
+    except (InputError, OSError) as exc:
+        status_field = 'markdown_status' if field == 'markdown_error' else 'index_status'
+        store.update(day, **{field: safe_error(exc), status_field: 'failed'})
+
+
+def delivery_complete(record, email, vault):
+    return ((not email or record['email_status'] == 'sent')
+            and (not vault or record['markdown_status'] == record['index_status'] == 'written'))
+
+
+def publish(store, day, config, sender, *, email=False, vault=False, now=clock):
+    record = store.get(day)
+    if record is None:
+        raise InputError(f'No saved lesson for {day}')
+    if delivery_complete(record, email, vault):
+        return record
+    reasons = publication_checks(store, record)
+    if reasons:
+        store.update(day, failure_reasons=reasons)
+        return store.get(day)
+    store.update(day, failure_reasons=[])
+    for active, channel in ((email, 'email'), (vault, 'vault')):
+        record = store.get(day)
+        complete = record['email_status'] == 'sent' if channel == 'email' else record['markdown_status'] == record['index_status'] == 'written'
+        if not active or complete:
+            continue
+        if now().astimezone(TZ).date().isoformat() != day:
+            store.update(day, failure_reasons=['Selected date has ended; no additional old-date channel will start'])
+            break
+        if channel == 'email':
+            send_email(store, record, config, sender, now)
+        else:
+            write_vault(store, record, config, now)
+    return store.get(day)
+
+
+def validate_resolution(record, *, mailbox_checked=False, retry=False, accepted_id=None, accepted_at=None, now=None):
+    now = now or clock()
+    if not mailbox_checked:
+        raise InputError('Resolution requires --mailbox-checked')
+    if bool(retry) == (accepted_id is not None) or (retry and accepted_at is not None):
+        raise InputError('Choose exactly --retry or --accepted-id with --accepted-at')
+    if record is None or record['email_status'] not in ('unknown', 'sending') or not record['message_bytes']:
+        raise InputError('Resolution requires an existing unknown/interrupted send record')
+    if retry:
+        return None
+    if not isinstance(accepted_id, str) or not accepted_id.strip():
+        raise InputError('--accepted-id must be nonempty')
+    try:
+        accepted = datetime.fromisoformat(accepted_at) if isinstance(accepted_at, str) else accepted_at
+        attempted = datetime.fromisoformat(record['email_attempt_at'])
+        if (not isinstance(accepted, datetime) or accepted.tzinfo is None or accepted.utcoffset() is None
+                or attempted.tzinfo is None or accepted > now or accepted < attempted):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise InputError('--accepted-at must have an offset and lie between the recorded send attempt and now') from None
+    return accepted.astimezone(TZ)
+
+
+def resolve_email(store, day, *, mailbox_checked=False, retry=False, accepted_id=None, accepted_at=None, now=None):
+    record = store.get(day)
+    accepted = validate_resolution(record, mailbox_checked=mailbox_checked, retry=retry,
+                                   accepted_id=accepted_id, accepted_at=accepted_at, now=now)
+    if retry:
+        store.update(day, email_status='failed', email_error='Mailbox checked; explicit retry authorized')
+    else:
+        store.ensure_context(record)
+        store.channel_success(day, accepted, email_status='sent', gmail_id=accepted_id,
+                              email_completed_at=accepted.isoformat(), email_error=None)
+    return store.get(day)

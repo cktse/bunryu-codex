@@ -1,229 +1,148 @@
-"""Explicit JSON configuration and deferred, private credential loading."""
-
-from dataclasses import dataclass, field
-from datetime import time
-import json
+from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
 import re
 import stat
 import tempfile
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
-CONFIG_FIELDS = {"db_path", "preview_path", "vault_path", "sender", "recipient", "timezone",
-                 "generate_time", "publish_time", "cutoff_time", "timeout_seconds", "ruby_mode",
-                 "llm_endpoint", "generation_model", "review_model", "google_client_id",
-                 "generation_reasoning_effort", "review_reasoning_effort"}
-REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+from .errors import InputError
+from .jsonio import loads
+
+
 SECRET_FIELDS = {"llm_api_key", "google_client_secret", "google_refresh_token"}
-UNSET_FIELDS = {"vault_path", "sender", "recipient", "llm_endpoint", "generation_model",
-                "review_model", "google_client_id"}
-ADDRESS = re.compile(r"[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+")
+SERVICE_FIELDS = {"sender", "recipient", "llm_endpoint", "generation_model", "review_model", "google_client_id"}
+PATH_FIELDS = {"db_path", "preview_path", "vault_path"}
+LEGACY_TIMES = {"generate_time", "publish_time", "cutoff_time"}
+EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
-def valid_endpoint(endpoint):
+def private_path(path, vault=None):
+    path = Path(path).expanduser().resolve()
+    if {"Mobile Documents", "iCloud Drive", "com~apple~CloudDocs"}.intersection(path.parts):
+        raise InputError(f"Private/export path is inside iCloud: {path}")
+    if vault and path.is_relative_to(Path(vault).resolve()):
+        raise InputError(f"Private/export path is inside the vault: {path}")
+    if any((parent / ".obsidian").is_dir() for parent in (path, *path.parents)):
+        raise InputError(f"Private/export path is inside an Obsidian vault: {path}")
+    return path
+
+
+def read_object(path, *, secret=False):
     try:
-        parsed = urlparse(endpoint)
-        parsed.port
-        return (parsed.scheme == "https" and bool(parsed.hostname) and bool(parsed.path)
-                and parsed.username is None and parsed.password is None and "?" not in endpoint
-                and "#" not in endpoint and not any(c.isspace() for c in endpoint))
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise InputError("JSON input must be a regular file")
+            if secret and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)):
+                raise InputError("Secrets must be owned by the current user with mode 0400 or 0600")
+            result = loads(stream.read())
+    except (OSError, UnicodeError, ValueError) as exc:
+        if isinstance(exc, InputError):
+            raise
+        raise InputError(f"Cannot read valid JSON from {path}: {type(exc).__name__}") from exc
+    if not isinstance(result, dict):
+        raise InputError("JSON input must be an object")
+    return result
+
+
+def endpoint_valid(value):
+    try:
+        parts = urlsplit(value)
+        port = parts.port
+        return (parts.scheme == "https" and bool(parts.hostname) and bool(parts.path)
+                and not parts.username and not parts.password and not parts.query
+                and not parts.fragment and "?" not in value and "#" not in value
+                and not re.search(r"[\s\x00-\x1f\x7f]", value)
+                and (port is None or 0 < port <= 65535))
     except ValueError:
         return False
 
 
-class ConfigError(ValueError):
-    """A diagnostic containing a file and field, with no supplied values."""
-
-    def __init__(self, source, name, reason):
-        name = name if re.fullmatch(r"[a-z_]{1,64}", str(name)) else "<field>"
-        super().__init__(f"{source}: {name}: {reason}")
-
-
-def in_icloud(path):
-    return any(part in ("Mobile Documents", "iCloud Drive", "com~apple~CloudDocs")
-               for part in Path(path).expanduser().resolve().parts)
-
-
-def beneath(path, root):
-    return Path(path).expanduser().resolve().is_relative_to(Path(root).expanduser().resolve())
-
-
-def in_vault(path):
-    path = Path(path).expanduser().resolve()
-    return any((p / ".obsidian").is_dir() for p in (path, *path.parents))
-
-
-def check_private_path(path, vault=None):
-    path = Path(path).expanduser().resolve()
-    if in_icloud(path) or in_vault(path) or (vault and beneath(path, vault)):
-        raise ConfigError(path, "file", "private files must stay outside iCloud and the vault")
-    return path
-
-
-def read_object(path, allowed_fields, private=False):
-    def unique_keys(pairs):
-        result = {}
-        for name, value in pairs:
-            if name in result:
-                raise ConfigError(path, name, "duplicate field")
-            result[name] = value
-        return result
-
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-            info = os.fstat(handle.fileno())
-            if not stat.S_ISREG(info.st_mode):
-                raise ConfigError(path, "file", "expected a regular JSON file")
-            if private and (info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in (0o600, 0o400)):
-                raise ConfigError(path, "permissions", "secrets must be owned by the running user with mode 0600 or 0400")
-            values = json.load(handle, object_pairs_hook=unique_keys)
-    except ConfigError:
-        raise
-    except (ValueError, UnicodeError):
-        raise ConfigError(path, "file", "malformed JSON") from None
-    except OSError:
-        raise ConfigError(path, "file", "cannot read the JSON file") from None
-    if not isinstance(values, dict):
-        raise ConfigError(path, "file", "expected a flat JSON object")
-    for name in values:
-        if name not in allowed_fields:
-            raise ConfigError(path, name, "field is not allowed in this file")
-    return values
-
-
 @dataclass
 class Config:
-    db_path: Path
-    preview_path: Path
-    vault_path: Path | None
-    sender: str
-    recipient: str
-    timezone: str
-    llm_endpoint: str
-    generation_model: str
-    review_model: str
-    generation_reasoning_effort: str
-    review_reasoning_effort: str
-    google_client_id: str
-    timeout_seconds: float
-    generate_time: time
-    publish_time: time
-    cutoff_time: time
-    ruby_mode: str
-    source: Path | str = field(repr=False)
+    db_path: Path = Path("~/Library/Application Support/N1Daily/lessons.sqlite3").expanduser()
+    preview_path: Path = Path(tempfile.gettempdir()) / "n1-daily-preview"
+    vault_path: Path | None = None
+    sender: str = ""
+    recipient: str = ""
+    timezone: str = "Asia/Hong_Kong"
+    timeout_seconds: float = 30
+    ruby_mode: str = "html"
+    llm_endpoint: str = ""
+    generation_model: str = ""
+    review_model: str = ""
+    generation_reasoning_effort: str = "medium"
+    review_reasoning_effort: str = "medium"
+    google_client_id: str = ""
 
     @classmethod
-    def from_file(cls, path=None):
-        source = check_private_path(path) if path is not None else "config.json (defaults)"
-        values = read_object(source, CONFIG_FIELDS) if path is not None else {}
-        for name, value in values.items():
-            if name in ("generation_reasoning_effort", "review_reasoning_effort"):
-                if not isinstance(value, str) or value not in REASONING_EFFORTS:
-                    raise ConfigError(source, name, "expected low, medium, high, xhigh, or max")
-            elif name == "timeout_seconds":
+    def load(cls, path):
+        path = private_path(path)
+        values = read_object(path)
+        if values.keys() - (cls.__dataclass_fields__.keys() | LEGACY_TIMES):
+            raise InputError("Unknown configuration field; credentials belong in the secrets file")
+        for key, value in values.items():
+            if key == "timeout_seconds":
                 if type(value) not in (int, float) or not 0 < value <= 300 or not math.isfinite(value):
-                    raise ConfigError(source, name, "expected a finite number greater than 0 and at most 300")
-            elif not isinstance(value, str) or (not value.strip() and not (name in UNSET_FIELDS and value == "")):
-                raise ConfigError(source, name, "expected a nonempty string, or an empty string for an unused setting")
+                    raise InputError("timeout_seconds must be a finite number greater than 0 and at most 300")
+            elif not isinstance(value, str) or (not value.strip() and key not in SERVICE_FIELDS | {"vault_path"}):
+                raise InputError(f"{key} must be a nonempty string")
+            elif key in LEGACY_TIMES and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+                raise InputError(f"{key} must use HH:MM")
+            elif key.endswith("reasoning_effort") and value not in EFFORTS:
+                raise InputError(f"{key} must be low, medium, high, xhigh, or max")
+            elif key in ("sender", "recipient") and value and not re.fullmatch(r"[^\s<>@,;]+@[^\s<>@,;]+\.[^\s<>@,;]+", value):
+                raise InputError(f"{key} must be a single email address")
+            elif key == "llm_endpoint" and value and not endpoint_valid(value):
+                raise InputError("llm_endpoint requires HTTPS host/path without credentials, query, or fragment")
+        values = {key: value for key, value in values.items() if key not in LEGACY_TIMES}
+        for key in PATH_FIELDS & values.keys():
+            value = values[key]
+            expanded = Path(value).expanduser() if value else None
+            values[key] = (path.parent / expanded).resolve() if expanded else None
+        result = cls(**values)
+        if result.timezone != "Asia/Hong_Kong" or result.ruby_mode not in ("html", "parentheses"):
+            raise InputError("timezone must be Asia/Hong_Kong; ruby_mode must be html or parentheses")
+        private_path(path, result.vault_path)
+        return result
 
-        def clock(name, default):
-            value = values.get(name, default)
-            if not re.fullmatch(r"\d{2}:\d{2}", value):
-                raise ConfigError(source, name, "expected local time in HH:MM format")
-            try:
-                return time.fromisoformat(value)
-            except ValueError:
-                raise ConfigError(source, name, "invalid local time") from None
+    def require(self, *fields):
+        missing = [field for field in fields if not getattr(self, field)]
+        if missing:
+            raise InputError("Missing service configuration: " + ", ".join(missing))
 
-        def data_path(name, default=""):
-            value = values.get(name, default)
-            if not value:
-                return None
-            try:
-                result = Path(value).expanduser()
-                if not result.is_absolute():
-                    result = (source.parent if path is not None else Path.cwd()) / result
-                return result.resolve()
-            except (OSError, ValueError, RuntimeError):
-                raise ConfigError(source, name, "invalid local path") from None
+    def check_database(self):
+        self.db_path = private_path(self.db_path, self.vault_path)
+        return self.db_path
 
-        generation = clock("generate_time", "07:45")
-        publication = clock("publish_time", "08:00")
-        cutoff = clock("cutoff_time", "12:00")
-        if generation > publication:
-            raise ConfigError(source, "publish_time", "must be at or after generate_time")
-        if publication >= cutoff:
-            raise ConfigError(source, "cutoff_time", "must be after publish_time")
-        if values.get("timezone", "Asia/Hong_Kong") != "Asia/Hong_Kong":
-            raise ConfigError(source, "timezone", "only Asia/Hong_Kong is supported")
-        if values.get("ruby_mode", "html") not in ("html", "parentheses"):
-            raise ConfigError(source, "ruby_mode", "expected html or parentheses")
-        endpoint = values.get("llm_endpoint", "")
-        if endpoint and not valid_endpoint(endpoint):
-            raise ConfigError(source, "llm_endpoint", "expected HTTPS host and path with no userinfo, query, or fragment")
-        for name in ("sender", "recipient"):
-            if values.get(name) and not ADDRESS.fullmatch(values[name]):
-                raise ConfigError(source, name, "expected one email address without a display name or list")
-        config = cls(
-            db_path=data_path("db_path", "~/Library/Application Support/N1Daily/lessons.sqlite3"),
-            preview_path=data_path("preview_path", str(Path(tempfile.gettempdir()) / "n1-daily-preview")),
-            vault_path=data_path("vault_path"), sender=values.get("sender", ""), recipient=values.get("recipient", ""),
-            timezone="Asia/Hong_Kong", llm_endpoint=endpoint,
-            generation_model=values.get("generation_model", ""), review_model=values.get("review_model", ""),
-            generation_reasoning_effort=values.get("generation_reasoning_effort", "medium"),
-            review_reasoning_effort=values.get("review_reasoning_effort", "medium"),
-            google_client_id=values.get("google_client_id", ""), timeout_seconds=values.get("timeout_seconds", 30),
-            generate_time=generation, publish_time=publication, cutoff_time=cutoff,
-            ruby_mode=values.get("ruby_mode", "html"), source=source)
-        if path is not None:
-            check_private_path(source, config.vault_path)
-        return config
-
-    def require(self, *names):
-        for name in names:
-            if not getattr(self, name):
-                raise ConfigError(self.source, name, "required for this service request")
-
-    def check_database_path(self):
-        if in_icloud(self.db_path) or in_vault(self.db_path) or (self.vault_path and beneath(self.db_path, self.vault_path)):
-            raise ConfigError(self.source, "db_path", "SQLite must stay outside iCloud and the vault")
-
-    def check_preview_path(self, path):
-        if in_icloud(path) or in_vault(path) or (self.vault_path and beneath(path, self.vault_path)):
-            raise ConfigError(self.source, "preview_path", "preview output must stay outside iCloud and the vault")
-        if any(part in ("LaunchAgents", "LaunchDaemons") for part in Path(path).expanduser().resolve().parts):
-            raise ConfigError(self.source, "preview_path", "export output must stay outside launchd job directories")
-
-
-@dataclass(repr=False, frozen=True)
-class Secrets:
-    llm_api_key: str = ""
-    google_client_secret: str = ""
-    google_refresh_token: str = ""
+    def check_output(self, path):
+        path = private_path(path, self.vault_path)
+        if {"LaunchAgents", "LaunchDaemons"}.intersection(path.parts):
+            raise InputError("Exports must stay outside launchd job directories")
+        return path
 
 
 class SecretSource:
-    """Keep a path until a service actually requires credentials."""
-
     def __init__(self, path, config):
-        self.path = Path(path).expanduser().resolve() if path is not None else None
+        self.path = path
         self.config = config
-        self._credentials = None
+        self._values = {}
 
-    def require(self, *names):
-        if self.path is None:
-            raise ConfigError("secrets.json", "file", "--secrets is required for this service request")
-        if self._credentials is None:
-            path = check_private_path(self.path, self.config.vault_path)
-            values = read_object(path, SECRET_FIELDS, private=True)
-            for name, value in values.items():
-                if not isinstance(value, str) or (value and not value.strip()):
-                    raise ConfigError(path, name, "expected a string; unused credentials may be empty")
-            self._credentials = Secrets(**values)
-        for name in names:
-            if not getattr(self._credentials, name):
-                raise ConfigError(self.path, name, "required for this service request")
-        return self._credentials
+    def require(self, *fields):
+        if not self.path:
+            raise InputError("This service requires an explicit --secrets file")
+        path = private_path(self.path, self.config.vault_path)
+        values = read_object(path, secret=True)
+        if values.keys() - SECRET_FIELDS or any(not isinstance(value, str) for value in values.values()):
+            raise InputError("Secrets contain unknown fields or invalid values")
+        self._values.update(values)
+        missing = [field for field in fields if not values.get(field, "").strip()]
+        if missing:
+            raise InputError("Missing service secrets: " + ", ".join(missing))
+        return {field: values[field] for field in fields}
+
+    def redactions(self):
+        return tuple(value for value in self._values.values() if value)

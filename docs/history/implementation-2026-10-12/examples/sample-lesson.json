@@ -1,0 +1,73 @@
+{
+  "lesson_id": "n1-2026-10-09",
+  "date": "2026-10-09",
+  "theme": "仕事",
+  "estimated_minutes": 12,
+  "status": "draft",
+  "attempt_count": 1,
+  "review_result": null,
+  "failure_reasons": [],
+  "first_published_at": null,
+  "generation_model": "authored-sample",
+  "review_model": "offline-fixture",
+  "prompt_version": "v1",
+  "questions": [
+    {
+      "id": "q1", "type": "kanji_reading", "subject": "kanji", "target": "斟酌／しんしゃく", "review_of": null,
+      "prompt_ja": "「斟酌」の読みとして最も適切なものを選んでください。\n担当者の事情を斟酌して、提出期限を一週間延ばした。",
+      "options": {"A": "しんしゃく", "B": "しんさく", "C": "ちんしゃく", "D": "せんしゃく"},
+      "correct_option_id": "A", "answer_ja": "斟酌（しんしゃく）",
+      "explanation_ja": "「斟酌する」は、相手の事情や心情をくみ取り、判断に反映させるという意味です。この文では、担当者の事情を考慮して期限を延ばしています。",
+      "distractors_ja": {"B": "「酌」の音読みは「しゃく」であり、「さく」ではありません。", "C": "「斟」の音読みは「しん」であり、「ちん」ではありません。", "D": "この語の「斟」は「しん」と読み、「せん」とは読みません。"},
+      "supplement_en": "斟酌 means taking someone’s circumstances into account when making a decision.", "supplement_yue": "即係考慮對方嘅處境，再作判斷。",
+      "ruby": [{"field": "answer_ja", "start": 0, "end": 2, "text": "斟酌", "reading": "しんしゃく"}]
+    },
+    {
+      "id": "q2", "type": "contextual_vocabulary", "subject": "vocabulary", "target": "脆弱", "review_of": null,
+      "prompt_ja": "括弧に入る最も適切な語を選んでください。\n資金調達を一社に依存するこの会社の財務基盤は、その会社との契約が切れれば経営が立ち行かなくなるほど（　）だ。",
+      "options": {"A": "強固", "B": "脆弱", "C": "円滑", "D": "精巧"},
+      "correct_option_id": "B", "answer_ja": "B「脆弱」",
+      "explanation_ja": "「脆弱」は、もろくて弱く、外からの変化や圧力に耐えにくい様子を表します。一社との契約が切れるだけで経営が成り立たなくなるため、財務基盤の弱さを述べる語が適切です。",
+      "distractors_ja": {"A": "「強固」はしっかりしていて崩れにくいことを表し、この文が述べる弱さと反対です。", "C": "「円滑」は物事が滞りなく進む様子であり、財務基盤の弱さを表しません。", "D": "「精巧」は作りが細かく巧みな様子であり、資金面の安定性を述べる語ではありません。"},
+      "supplement_en": "The context describes financial vulnerability caused by dependence on a single source of funding.", "supplement_yue": "", "ruby": [{"field": "answer_ja", "start": 2, "end": 4, "text": "脆弱", "reading": "ぜいじゃく"}]
+    },
+    {
+      "id": "q3", "type": "grammar_selection", "subject": "grammar", "target": "を余儀なくされる", "review_of": null,
+      "prompt_ja": "括弧に入る最も適切な表現を選んでください。\n会場が突然使用できなくなり、主催者は、予定どおり開催したいと考えていたにもかかわらず、日程の変更（　）。",
+      "options": {"A": "に先立った", "B": "をものともしなかった", "C": "を余儀なくされた", "D": "に即した"},
+      "correct_option_id": "C", "answer_ja": "C「を余儀なくされた」",
+      "explanation_ja": "「名詞＋を余儀なくされる」は、外的な事情によって、望んでいない行動をせざるを得なくなることを表します。会場が使えなくなったため、主催者は意に反して日程を変更することになりました。",
+      "distractors_ja": {"A": "「に先立つ」はある出来事より前に行うことを表します。この文の主催者が変更より前に何をしたのかが示されず、強制された変更も表せません。", "B": "「をものともしない」は困難を気にせず行動することです。ここで必要なのは、困難を克服したという意味ではなく、外的事情によって変更することになったという意味です。", "D": "「に即する」は基準や状況に従うことです。「主催者が日程の変更に即した」では、変更を強いられたという文脈を表せません。"},
+      "supplement_en": "The passive expression describes an unwanted action forced by circumstances.", "supplement_yue": "", "ruby": []
+    },
+    {
+      "id": "q4", "type": "paraphrase", "subject": "vocabulary", "target": "懸念", "review_of": null,
+      "prompt_ja": "次の文の「懸念している」に最も近い意味の表現を選んでください。\n部長は、急な人員削減によってサービスの質が低下することを懸念している。",
+      "options": {"A": "楽しみにしている", "B": "確実だと断定している", "C": "実現するよう求めている", "D": "心配している"},
+      "correct_option_id": "D", "answer_ja": "D「心配している」",
+      "explanation_ja": "「懸念する」は、望ましくないことが起こるのではないかと心配するという意味です。質の低下がすでに確定したと述べているわけではありません。",
+      "distractors_ja": {"A": "「楽しみにする」は望ましい出来事を期待することであり、質の低下を心配する意味と反対です。", "B": "「断定する」は確実だと言い切ることです。「懸念する」には、出来事が確定したという意味はありません。", "C": "「求める」は実現を望んで要求することです。部長は質の低下を望んでいません。"},
+      "supplement_en": "懸念 expresses concern about a possible unwelcome outcome.", "supplement_yue": "", "ruby": []
+    },
+    {
+      "id": "q5", "type": "usage", "subject": "vocabulary", "target": "齟齬", "review_of": null,
+      "prompt_ja": "「齟齬」の使い方として最も適切な文を選んでください。",
+      "options": {"A": "契約条件について両社の認識に齟齬があり、協議をやり直した。", "B": "契約内容を詳しく説明して、取引先の齟齬を得た。", "C": "新しい研修制度には、社員の意欲を高める齟齬が期待される。", "D": "異動を前に、これまで世話になった同僚に齟齬を述べた。"},
+      "correct_option_id": "A", "answer_ja": "A「齟齬」",
+      "explanation_ja": "「齟齬」は、意見や認識などが食い違い、うまくかみ合わないことを表します。「認識に齟齬がある」は、同じ契約条件を両社が異なる意味で理解している状況に合います。",
+      "distractors_ja": {"B": "「齟齬」は相手から得る理解や同意を表しません。この文では「取引先の理解を得た」などが適切です。", "C": "社員の意欲を高める働きは「効果」であり、認識などの食い違いを表す「齟齬」は使えません。", "D": "世話になった同僚に伝える感謝の気持ちは「謝意」などで表します。「齟齬を述べる」はこの意味の表現にはなりません。"},
+      "supplement_en": "齟齬 refers to a mismatch between understandings, views, or accounts.", "supplement_yue": "", "ruby": [{"field": "answer_ja", "start": 2, "end": 4, "text": "齟齬", "reading": "そご"}]
+    },
+    {
+      "id": "q6", "type": "sentence_ordering", "subject": "grammar", "target": "にもまして", "review_of": null,
+      "prompt_ja": "四つの語句を並べ替えて文を完成させてください。★（三番目）に入る語句を選んでください。",
+      "prefix_ja": "今回の交渉では、", "suffix_ja": "重要だ。", "starred_position": 3,
+      "options": {"A": "価格", "B": "にもまして、", "C": "長期的な信頼関係を", "D": "維持できるかどうかが"},
+      "correct_order": ["A", "B", "C", "D"], "reconstructed_sentence_ja": "今回の交渉では、価格にもまして、長期的な信頼関係を維持できるかどうかが重要だ。",
+      "correct_option_id": "C", "answer_ja": "C「長期的な信頼関係を」",
+      "explanation_ja": "「にもまして」は「それ以上に」という意味です。この文では、価格よりも、長期的な信頼関係を維持できるかどうかが重要だと述べています。「価格にもまして」の後に、より重視する内容が続きます。",
+      "distractors_ja": {"A": "「価格」は比較の基準なので、「にもまして」の直前、一番目に置きます。", "B": "「にもまして、」は「価格」に続く二番目の語句です。", "D": "「維持できるかどうかが」は、目的語の「長期的な信頼関係を」に続く四番目の語句です。"},
+      "supplement_en": "にもまして places greater importance on the following consideration than on the preceding one.", "supplement_yue": "", "ruby": []
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 # Implementation and Specification Reconciliation
 
+Historical scope: the one-off 2026-10-09 audit and its section 9 corrections, including removal of `dry-run`. This file preserves findings and evidence from that period. It is archived alongside the [previous specification](n1-daily-email-design-2026-10-12.md). Current requirements, later revisions, and their validation evidence live in [the main specification](../../n1-daily-email-design.md); this report is not an ongoing specification or implementation log.
+
 Audit date: 2026-10-09. Baseline: commit `3d32620` plus the working directory. This report compares all application modules, the sample, configuration templates, README, contributor guidance, and tests with `n1-daily-email-design.md`. It records findings and recommendations; it does not approve requirements or authorize implementation.
 
 At the initial audit, the specification proposed removing `dry-run` and retaining `preview`; the application, tests, and command documentation still exposed both commands pending review. No production code or tests were changed during that audit. No email was sent, real-vault lesson files written, or schedule enabled.
@@ -8,7 +10,7 @@ At the initial audit, the specification proposed removing `dry-run` and retainin
 
 ## Approved reconciliation follow-up
 
-The user approved specification section 9. Its offline implementation is complete, with **115 tests passing**, including 35 new regression tests in [test_reconciliation.py](tests/test_reconciliation.py). Initial failing runs reproduced the audit defects before their fixes. The remaining tables and findings below preserve the original audit snapshot; they do not describe unresolved defects after this follow-up.
+The user approved specification section 9. Its offline implementation is complete, with **115 tests passing**, including 35 new regression tests in [test_reconciliation.py](../../tests/test_reconciliation.py). Initial failing runs reproduced the audit defects before their fixes. The remaining tables and findings below preserve the original audit snapshot; they do not describe unresolved defects after this follow-up.
 
 | Finding | Implemented behavior | Regression evidence |
 | --- | --- | --- |
@@ -26,22 +28,6 @@ Related scope gaps are resolved under section 9: generation is restricted to tod
 The forward specification baseline is explicitly approved. README documents the supported CLI semantics and exit codes, endpoint restrictions, setup, and implementation choices. AGENTS now describes the observed `feat:`/`fix:` commit examples. Scheduling still exports the same inactive two-channel artifact; no selection or installation commands were added. Published-content correction tooling remains deferred.
 
 Static reading found the sample's English and traditional-script Cantonese supplements readable. The Japanese ordering explanation now states the comparison in context. The sample's N1 difficulty and estimated duration remain unverified by the user; synthetic verdicts and static reading do not establish linguistic acceptance. Actual provider behavior, received messages, iPhone clients, offline controls, enlarged-text legibility, iCloud synchronization, launchd execution, and Mac notification display remain pending separately authorized acceptance work. No live services, real-vault lesson writes, or scheduling were activated.
-
-## Approved Responses API follow-up
-
-The user approved specification section 10. Generation and review now use Responses with complete context on every request, JSON mode through `text.format`, explicit `reasoning.effort`, and `store: false`. Output parsing accepts completed final assistant text, skips reasoning/commentary, and rejects incomplete, refused, malformed, or non-object output. Existing service recovery and the one-correction limit remain in force.
-
-Both effort fields independently default to medium and accept the five approved values. Existing Chat Completions configurations require an explicit endpoint update; no protocol, model, or effort fallback was added. README documents migration and a medium-generation/high-review example, and the configuration template records both medium defaults.
-
-Validation: **133 tests passed**, including 18 new tests in [test_responses.py](tests/test_responses.py). The initial failing run established the missing configuration and protocol behavior before implementation. Tests cover exact serialized HTTP requests through a fake standard-library transport, effort routing on corrections and reviews, split final output after reasoning/commentary, safe provider failures, outage recovery with updated settings, persisted correction limits across restarts, and saved previews without settings or credentials. Review verdicts remain synthetic fixtures.
-
-Standalone `python3 -m n1_daily preview` produced all five sample artifacts in a temporary directory, and `python3 -m n1_daily validate` passed. The diff was checked against approved section 10; no scope deviations were identified. No actual provider request, real-vault lesson write, email delivery, or scheduling activation occurred. Provider compatibility and linguistic quality remain live acceptance work requiring separate authorization.
-
-## Approved manual-generation follow-up
-
-The user approved section 11. Manual `generate` now accepts any valid selected date at any time, defaulting to today in Asia/Hong_Kong. It resumes retryable configuration/service failures with the saved assignment, draft, feedback, and correction budget. Ready content is reused without model calls or credentials; terminal failures remain closed. Generation performs no delivery or publication accounting. Daily generation and publication retain their approved timing rules pending review of proposed section 12.
-
-Validation: **142 tests passed**, including nine new cases in [test_manual_generation.py](tests/test_manual_generation.py). The initial run failed on the old date/time gate before its removal. Offline fixtures exercise past/future dates, midnight and late-night invocations, interrupted generation/review across restarts, repaired setup, preserved correction feedback, ready-content reuse without secrets, terminal failures, and overlap prevention. Existing rejection tests now verify publication restrictions, and daily window tests continue to pass. The implementation change removes only the manual generation guard; no broader scheduling change or live service activation was implemented.
 
 ## Evidence and limits
 
@@ -91,7 +77,7 @@ Validation: **142 tests passed**, including nine new cases in [test_manual_gener
 
 Requirement: §3.2 records failed content and allows subsequent daily work; §5.1 identifies malformed structure.
 
-[Store.context](n1_daily/store.py) (lines 140–144) iterates `old.get("questions", [])` without verifying it is a list. Failed drafts are included in `history`. A retained draft containing `{"questions": null}` causes a later date to raise `TypeError: 'NoneType' object is not iterable` before contacting the model. Other malformed historical entries can also disrupt duplicate checks.
+[Store.context](../../n1_daily/store.py) (lines 140–144) iterates `old.get("questions", [])` without verifying it is a list. Failed drafts are included in `history`. A retained draft containing `{"questions": null}` causes a later date to raise `TypeError: 'NoneType' object is not iterable` before contacting the model. Other malformed historical entries can also disrupt duplicate checks.
 
 Confirmed offline: save that failed draft for 2026-10-09, then generate 2026-10-10. The exception escapes. Existing malformed-history tests exercise `check_lesson` directly, bypassing `Store.context`.
 
@@ -101,7 +87,7 @@ Recommended correction: safely extract usable historical questions while retaini
 
 Requirement: §3.2 persists model failure reasons and permits a later retry; §6.3 reports unsuccessful work.
 
-[JsonModel._call](n1_daily/llm.py) catches HTTP errors, `OSError`, and `ValueError`. `http.client.IncompleteRead` is outside those categories and also escapes `generate` and the CLI handler.
+[JsonModel._call](../../n1_daily/llm.py) catches HTTP errors, `OSError`, and `ValueError`. `http.client.IncompleteRead` is outside those categories and also escapes `generate` and the CLI handler.
 
 Confirmed offline: inject `IncompleteRead` during generation. The exception escapes, leaving status `draft` and failure reasons `[]`. Existing timeout/outage tests do not cover this case. During OAuth refresh the same exception reaches the generic send handler and becomes `unknown`, although Gmail has not been contacted; this unnecessarily blocks safe automatic retry.
 
@@ -111,7 +97,7 @@ Recommended correction: distinguish incomplete LLM responses as retryable outage
 
 Requirement: §3.3 attempts channels independently and preserves successful delivery.
 
-[channels](n1_daily/cli.py) (lines 102–112) raises for missing `vault_path` before `deliver` runs. With both activation flags, a vault configuration failure prevents any email attempt. The inverse email-configuration failure is handled independently and already tested.
+[channels](../../n1_daily/cli.py) (lines 102–112) raises for missing `vault_path` before `deliver` runs. With both activation flags, a vault configuration failure prevents any email attempt. The inverse email-configuration failure is handled independently and already tested.
 
 Confirmed offline with temporary configuration and a mocked sender: `daily` returns 2 for missing `vault_path`; the Gmail client is never created.
 
@@ -129,7 +115,7 @@ Confirmed offline with valid public LLM settings and no secret-file argument: th
 
 Requirement: §4.2 and §5.1 restrict annotations to existing allowed answer fields.
 
-[answer_field](n1_daily/content.py) (lines 175–183) uses only the second dot-separated component of a distractor path. An annotation for `distractors_ja.B.extra` passes `check_lesson` when its offsets match distractor B. The renderer requires an exact field match, so the annotation is omitted from the output.
+[answer_field](../../n1_daily/content.py) (lines 175–183) uses only the second dot-separated component of a distractor path. An annotation for `distractors_ja.B.extra` passes `check_lesson` when its offsets match distractor B. The renderer requires an exact field match, so the annotation is omitted from the output.
 
 Confirmed offline: `check_lesson` returned `[]` for that invalid field path. Recommended correction: enforce exact allowed field names and test rejection plus rendered annotation preservation.
 
@@ -137,7 +123,7 @@ Confirmed offline: `check_lesson` returned `[]` for that invalid field path. Rec
 
 Requirement: §4.3 retains offending text, failure reason, and required change for every failure.
 
-[check_review](n1_daily/content.py) (lines 209–218) checks the reason but permits missing `offending_text` and `change`. It rejects the draft, yet accepts incomplete failure detail into the stored review and correction feedback.
+[check_review](../../n1_daily/content.py) (lines 209–218) checks the reason but permits missing `offending_text` and `change`. It rejects the draft, yet accepts incomplete failure detail into the stored review and correction feedback.
 
 Confirmed offline: a failed criterion with only a reason yields blank `offending text:` and `change:`. Recommended correction: reject incomplete failure reports explicitly and supply actionable feedback within the existing correction limit.
 
@@ -145,7 +131,7 @@ Confirmed offline: a failed criterion with only a reason yields blank `offending
 
 Requirement: §5.1 defines mechanical checks; the README says `validate` runs them.
 
-[preview_lesson](n1_daily/cli.py) returns a saved record immediately when status is ready. `validate --date` then prints “Mechanical content checks passed” without examining its content.
+[preview_lesson](../../n1_daily/cli.py) returns a saved record immediately when status is ready. `validate --date` then prints “Mechanical content checks passed” without examining its content.
 
 Confirmed offline: remove option D from a temporary saved ready lesson; `validate --date` returns 0 and prints success. File-based validation also assumes the first day's work theme/formats and empty history, so it rejects later themes and cannot establish history-dependent checks.
 
@@ -155,7 +141,7 @@ Recommended correction: specify validation input/context semantics before changi
 
 Requirement: the approved configuration table prohibits embedded credentials in `llm_endpoint`.
 
-[Config.from_file](n1_daily/config.py) (lines 145–158) rejects URL userinfo and four credential query names, but accepts `?client_secret=SYNTHETIC_SECRET`.
+[Config.from_file](../../n1_daily/config.py) (lines 145–158) rejects URL userinfo and four credential query names, but accepts `?client_secret=SYNTHETIC_SECRET`.
 
 Confirmed offline with a synthetic value. No actual credential leak was observed. Recommended correction: agree on permitted endpoint URL components and enforce that policy; do not assume a short query-name list establishes credential-free URLs.
 

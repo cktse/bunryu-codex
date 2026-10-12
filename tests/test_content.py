@@ -1,185 +1,107 @@
-import copy
-import json
-from pathlib import Path
+from copy import deepcopy
+from email import policy
+from email.parser import BytesParser
 import unittest
 
-from n1_daily.content import CRITERIA, check_lesson, check_review, sample_assignment
-from n1_daily.render import render_html, render_markdown, render_text, message_bytes
-
-
-def sample():
-    return json.loads((Path(__file__).parents[1] / "examples/sample-lesson.json").read_text())
-
-
-def passing_review(lesson):
-    """Synthetic gate fixture, never evidence of linguistic correctness."""
-    return {"questions": [
-        {"id": q["id"], "options": {
-            option: {"fits": option == q["correct_option_id"], "reason": "Fixture context assessment"}
-            for option in "ABCD"},
-         "criteria": {name: {"status": "pass", "reason": "Fixture assessment"} for name in CRITERIA}}
-        for q in lesson["questions"]]}
+from helpers import lesson, review
+from n1_daily.content import assignment, check_lesson, check_review, fingerprint
+from n1_daily.render import email_message, render_html, render_markdown, render_text
 
 
 class ContentTests(unittest.TestCase):
-    def setUp(self):
-        self.lesson = sample()
-        self.assignment = sample_assignment(self.lesson["date"])
+    def test_sample_and_format_rotation(self):
+        content = lesson()
+        self.assertEqual([], check_lesson(content, assignment(content["date"]), []))
+        self.assertEqual(
+            ["usage", "sentence_ordering", "reading_comprehension"],
+            [slot["type"] for slot in assignment(content["date"], 1)["slots"][3:]],
+        )
 
-    def errors(self):
-        return check_lesson(self.lesson, self.assignment, [])
+    def test_malformed_content_reports_fields_instead_of_crashing(self):
+        cases = [
+            ("options", lambda q: q["options"].pop("D")),
+            ("correct_option_id", lambda q: q.update(correct_option_id=[])),
+            ("supplement_en", lambda q: q.update(supplement_en=False)),
+            ("passage_ja", lambda q: q.update(passage_ja={"unexpected": "object"})),
+            ("ruby", lambda q: q["ruby"][0].update(field="distractors_ja.B.extra")),
+            ("ruby", lambda q: q["ruby"][0].update(start=True)),
+            ("review_of", lambda q: q.update(review_of={"lesson_id": "", "question_id": ""})),
+        ]
+        for field, change in cases:
+            with self.subTest(field=field):
+                content = lesson()
+                change(content["questions"][0])
+                self.assertTrue(any(field in reason for reason in check_lesson(content)))
+        for value in (None, [], {"questions": None}, {"questions": [None] * 6}):
+            self.assertTrue(check_lesson(value))
 
-    def test_complete_sample_passes_mechanical_checks(self):
-        self.assertEqual([], self.errors())
+    def test_duplicate_targets_and_visible_wording(self):
+        content = lesson()
+        content["questions"][3]["target"] = "  脆弱  "
+        self.assertTrue(any("target" in error for error in check_lesson(content)))
+        old = lesson("2026-10-11")
+        old["first_published_at"] = "2026-10-11T08:00:00+08:00"
+        self.assertTrue(any("wording" in error for error in check_lesson(lesson(), history=[old])))
+        self.assertTrue(any("target" in error for error in check_lesson(lesson(), history=[old])))
 
-    def test_missing_option_names_question_and_field(self):
-        del self.lesson["questions"][0]["options"]["D"]
-        self.assertTrue(any("q1.options" in e for e in self.errors()))
+    def test_ordering_and_answer_only_ruby(self):
+        content = lesson()
+        content["questions"][5]["reconstructed_sentence_ja"] += "別の文。"
+        self.assertTrue(any("reconstructed_sentence_ja" in error for error in check_lesson(content)))
+        content = lesson()
+        content["questions"][0]["ruby"][0]["field"] = "prompt_ja"
+        self.assertTrue(any("ruby" in error for error in check_lesson(content)))
 
-    def test_wrong_distractor_set(self):
-        self.lesson["questions"][0]["distractors_ja"]["A"] = "incorrect"
-        self.assertTrue(any("q1.distractors_ja" in e for e in self.errors()))
-
-    def test_ruby_bounds_overlap_and_reading(self):
-        q = self.lesson["questions"][0]
-        for replacement in (
-            {"end": 999}, {"start": -1}, {"field": "prompt_ja"},
-            {"reading": "シンシャク"}, {"text": "別の語"},
+    def test_reviews_require_all_options_criteria_and_failure_details(self):
+        content = lesson()
+        good = review(content)
+        self.assertEqual([], check_review(content, good))
+        for change in (
+            lambda r: r["questions"][0]["options"]["B"].update(fits=True),
+            lambda r: r["questions"][0]["criteria"].pop("ruby_quality"),
+            lambda r: r["questions"][0]["criteria"]["unique_answer"].update(status="fail"),
+            lambda r: r["questions"][0]["criteria"]["supplement_accuracy"].update(status="inapplicable"),
         ):
-            with self.subTest(replacement=replacement):
-                q["ruby"] = [{**sample()["questions"][0]["ruby"][0], **replacement}]
-                self.assertTrue(any("q1.ruby" in e for e in self.errors()))
-        q["ruby"] = [copy.deepcopy(sample()["questions"][0]["ruby"][0])] * 2
-        self.assertTrue(any("overlap" in e for e in self.errors()))
+            bad = deepcopy(good)
+            change(bad)
+            self.assertTrue(check_review(content, bad))
+        good["questions"][1]["criteria"]["supplement_accuracy"]["status"] = "inapplicable"
+        self.assertTrue(check_review(content, good))  # English is still present.
+        content["questions"][1]["supplement_en"] = ""
+        self.assertEqual([], check_review(content, good))
 
-    def test_duplicate_wording_normalizes_whitespace(self):
-        self.lesson["questions"][1]["prompt_ja"] = "  " + self.lesson["questions"][0]["prompt_ja"].replace("\n", "   ")
-        self.lesson["questions"][1]["options"] = copy.deepcopy(self.lesson["questions"][0]["options"])
-        self.assertTrue(any("duplicate" in e for e in self.errors()))
+    def test_fingerprint_binds_review_and_context_but_not_mutable_status(self):
+        content = lesson()
+        context = {"history": []}
+        verdict = review(content)
+        before = fingerprint(content, assignment(content["date"]), context, verdict)
+        content["status"] = "sent"
+        self.assertEqual(before, fingerprint(content, assignment(content["date"]), context, verdict))
+        content["questions"][0]["answer_ja"] += "変更"
+        self.assertNotEqual(before, fingerprint(content, assignment(content["date"]), context, verdict))
 
-    def test_different_exercises_can_share_an_instruction(self):
-        old = sample()
-        for q in self.lesson["questions"]:
-            q["target"] += "別項目"
-            q["prompt_ja"] += "別場面"
-        q = self.lesson["questions"][3]
-        q["prompt_ja"] = old["questions"][3]["prompt_ja"]
-        q["options"]["D"] += "。"
-        self.assertEqual([], check_lesson(self.lesson, self.assignment, [old]))
-
-    def test_invalid_earlier_drafts_do_not_crash_checks(self):
-        history = [{"questions": [None, {"prompt_ja": "bad", "options": []}]}]
-        self.assertEqual([], check_lesson(self.lesson, self.assignment, history))
-
-    def test_history_blocks_new_targets_and_duplicate_wording(self):
-        old = sample()
-        old["first_published_at"] = "2026-10-08T08:00:00+08:00"
-        self.assertTrue(any("target" in e for e in check_lesson(self.lesson, self.assignment, [old])))
-
-    def test_assignment_and_review_reference_must_match(self):
-        self.lesson["questions"][0]["review_of"] = {"lesson_id": "missing", "question_id": "q1"}
-        self.assertTrue(any("review_of" in e for e in self.errors()))
-        self.lesson["questions"][1]["type"] = "usage"
-        self.assertTrue(any("q2.type" in e for e in self.errors()))
-
-    def test_review_preserves_original_target_and_requires_published_history(self):
-        old = sample()
-        old["first_published_at"] = "2026-10-09T08:00:00+08:00"
-        ref = {"lesson_id": old["lesson_id"], "question_id": "q1"}
-        self.assignment["slots"][0]["review_of"] = ref
-        q = self.lesson["questions"][0]
-        q["review_of"] = ref
-        q["prompt_ja"] = "別の状況で斟酌の読みを選んでください。"
-        # Other new targets also need distinct identities for this test.
-        for other in self.lesson["questions"][1:]:
-            other["target"] += "別項目"
-            other["prompt_ja"] += "別場面"
-        self.assertEqual([], check_lesson(self.lesson, self.assignment, [old]))
-        q["target"] = "changed"
-        self.assertTrue(any("preserve" in e for e in check_lesson(self.lesson, self.assignment, [old])))
-        old["first_published_at"] = None
-        self.assertTrue(any("published" in e for e in check_lesson(self.lesson, self.assignment, [old])))
-
-    def test_ordering_key_and_reconstruction(self):
-        q = self.lesson["questions"][5]
-        q["starred_position"] = 2
-        self.assertTrue(any("starred_position" in e for e in self.errors()))
-        q["correct_order"] = ["A"] * 4
-        self.assertTrue(any("correct_order" in e for e in self.errors()))
-
-    def test_reading_requires_passage(self):
-        self.assignment["slots"][5]["type"] = "reading_comprehension"
-        self.assignment["slots"][5]["subject"] = "vocabulary"
-        self.lesson["questions"][5].update(type="reading_comprehension", subject="vocabulary")
-        self.assertTrue(any("passage_ja" in e for e in self.errors()))
-
-    def test_incomplete_or_ambiguous_review_fails(self):
-        review = passing_review(self.lesson)
-        self.assertEqual([], check_review(self.lesson, review))
-        review["questions"][0]["options"]["B"]["fits"] = True
-        self.assertTrue(any("q1.options" in e for e in check_review(self.lesson, review)))
-        del review["questions"][1]["criteria"]["ruby_quality"]
-        self.assertTrue(any("q2.criteria" in e for e in check_review(self.lesson, review)))
-        self.assertTrue(check_review(self.lesson, {"approved": True}))
-
-    def test_failed_distractor_review_blocks_readiness_with_details(self):
-        review = passing_review(self.lesson)
-        review["questions"][0]["criteria"]["explanation_accuracy"] = {
-            "status": "fail", "reason": "Wrong reading rule", "offending_text": "さく",
-            "change": "Explain the correct reading"}
-        self.assertTrue(any("Wrong reading rule" in e for e in check_review(self.lesson, review)))
-
-    def test_inapplicable_only_for_absent_supplement(self):
-        review = passing_review(self.lesson)
-        review["questions"][0]["criteria"]["unique_answer"]["status"] = "inapplicable"
-        self.assertTrue(check_review(self.lesson, review))
-
-    def test_malformed_json_shapes_return_errors(self):
-        for value in (None, [], {"questions": [None] * 6}, {"questions": "bad"}):
-            with self.subTest(value=value):
-                self.assertTrue(check_lesson(value, self.assignment, []))
-        self.lesson["questions"][0]["options"] = ["A", "B"]
-        self.assertTrue(self.errors())
-
-
-class RendererTests(unittest.TestCase):
-    def test_six_independent_offline_controls_and_answer_only_ruby(self):
-        html = render_html(sample())
+    def test_renderers_keep_answers_after_controls_and_plain_text_questions(self):
+        content = lesson()
+        html = render_html(content)
+        markdown = render_markdown(content)
+        text = render_text(content)
         self.assertEqual(6, html.count('type="checkbox"'))
-        self.assertEqual(6, html.count('class="answer"'))
-        self.assertIn("input:checked ~ .answer", html)
-        for i in range(1, 7):
-            self.assertIn(f'for="reveal-q{i}"', html)
-        self.assertIn("<ruby>斟酌<rt>しんしゃく</rt></ruby>", html)
-        self.assertNotIn("<script", html)
-        self.assertNotIn("https://", html)
+        self.assertEqual(6, markdown.count("> [!answer]-"))
+        self.assertLess(html.index('id="answer-q1"'), html.index("<ruby>"))
+        self.assertLess(text.index("問6"), text.index("解答・解説"))
+        self.assertIn("正解: A", text)
+        self.assertIn("斟酌（しんしゃく）", render_markdown(content, "parentheses"))
+        self.assertNotIn("&amp;", render_text(content))
+        message = BytesParser(policy=policy.default).parsebytes(
+            email_message(content, "a@example.com", "b@example.com")
+        )
+        self.assertTrue(message["Date"])
+        self.assertTrue(message["Message-ID"])
+        self.assertEqual(["text/plain", "text/html"], [p.get_content_type() for p in message.iter_parts()])
 
-    def test_markdown_collapsed_callouts_order_and_notes_link(self):
-        md = render_markdown(sample())
-        self.assertEqual(6, md.count("> [!answer]-"))
-        self.assertIn("[[Notes/2026-10-09|", md)
-        self.assertIn("A → B → C → D", md)
-        self.assertIn("★", md)
-        self.assertIn("脆弱（ぜいじゃく）", render_markdown(sample(), ruby_mode="parentheses"))
-
-    def test_plaintext_has_all_questions_before_answers(self):
-        body = render_text(sample())
-        self.assertLess(body.index("6."), body.index("解答・解説"))
-
-    def test_html_and_markdown_escape_untrusted_content(self):
-        lesson = sample()
-        lesson["questions"][0]["prompt_ja"] = '<script>alert(1)</script> **x** [[Notes/evil]]'
-        self.assertNotIn("<script>", render_html(lesson))
-        self.assertNotIn("<script>", render_markdown(lesson))
-        self.assertNotIn("[[Notes/evil]]", render_markdown(lesson))
-
-    def test_message_has_plain_and_html_parts_and_no_answer_subject(self):
-        from email import policy
-        from email.parser import BytesParser
-        msg = BytesParser(policy=policy.default).parsebytes(message_bytes(sample(), "from@example.test", "to@example.test"))
-        self.assertEqual(["text/plain", "text/html"], [p.get_content_type() for p in msg.iter_parts()])
-        self.assertNotIn("斟酌", msg["Subject"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_literal_markdown_cannot_escape_answer_callout(self):
+        content = lesson()
+        content["questions"][0]["supplement_en"] = "Literal *text*\n# title\n[[link]]"
+        output = render_markdown(content)
+        self.assertIn("> \\# title", output)
+        self.assertIn("> \\[\\[link\\]\\]", output)

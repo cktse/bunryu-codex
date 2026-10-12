@@ -1,1 +1,1 @@
-"""Daily N1 lessons: generation, saved content, and independent delivery."""
+"""Daily JLPT N1 lesson generation and explicit publication."""

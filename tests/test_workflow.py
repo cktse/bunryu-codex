@@ -1,342 +1,281 @@
-import copy
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from test_content import passing_review, sample
+from helpers import Model, Sender, lesson, review
+from n1_daily.config import Config
+from n1_daily.errors import DeliveryError, InputError, ModelOutputError, ServiceError
 from n1_daily.store import Store, run_lock
-from n1_daily.workflow import generate, deliver, daily
-from n1_daily.services import DefiniteFailure, UncertainSend
+from n1_daily.workflow import generate, publish, resolve_email
 
-
-class FakeModel:
-    generation_model = "test-generator"
-    review_model = "test-reviewer"
-
-    def __init__(self, invalid=False, reject=False, outage=False):
-        self.calls = []
-        self.invalid, self.reject, self.outage = invalid, reject, outage
-
-    def draft(self, context, failures, previous):
-        self.calls.append(("draft", copy.deepcopy(context), failures))
-        if self.outage:
-            raise TimeoutError("model unavailable")
-        lesson = sample()
-        lesson["date"] = context["assignment"]["date"]
-        lesson["lesson_id"] = "n1-" + lesson["date"]
-        if self.invalid:
-            del lesson["questions"][0]["options"]["D"]
-        return lesson
-
-    def review(self, lesson, context):
-        self.calls.append(("review", copy.deepcopy(context)))
-        if self.outage:
-            raise TimeoutError("review unavailable")
-        result = passing_review(lesson)
-        if self.reject:
-            result["questions"][0]["options"]["B"]["fits"] = True
-        return result
-
-
-class FakeSender:
-    def __init__(self, outcomes=None):
-        self.messages = []
-        self.outcomes = list(outcomes or ["gmail-1"])
-
-    def send(self, payload):
-        self.messages.append(payload)
-        result = self.outcomes.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
+NOW = datetime(2026, 10, 12, 8, tzinfo=ZoneInfo('Asia/Hong_Kong'))
+DAY = NOW.date().isoformat()
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.store = Store(self.root / "lessons.sqlite3")
-        self.now = datetime(2026, 10, 9, 8, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
-        self.day = self.now.date().isoformat()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.path = self.root / 'lessons.sqlite3'
+        self.store = Store(self.path)
+        self.addCleanup(lambda: self.store.close())
+        self.vault = self.root / 'vault'
+        self.vault.mkdir()
+        self.config = Config(db_path=self.path, vault_path=self.vault, sender='a@example.com', recipient='b@example.com')
+        self.sender = Sender()
 
-    def tearDown(self):
+    def ready(self, day=DAY):
+        return generate(self.store, day, Model(lesson(day)))
+
+    def publish(self, **kwargs):
+        return publish(self.store, DAY, self.config, self.sender, now=lambda: NOW, **kwargs)
+
+    def restart(self):
         self.store.close()
-        self.tmp.cleanup()
+        self.store = Store(self.path)
 
-    def ready(self):
-        model = FakeModel()
-        generate(self.store, self.day, model)
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        return model
-
-    def publish(self, sender=None, vault=None):
-        return deliver(self.store, self.day, sender, vault, "from@example.test", "to@example.test", self.now)
-
-    def test_normal_generation_is_two_calls_and_saves_matching_review(self):
-        model = self.ready()
-        self.assertEqual(["draft", "review"], [c[0] for c in model.calls])
-        record = self.store.get(self.day)
-        self.assertIsNotNone(record["review_result"])
-        self.assertEqual(1, record["attempt_count"])
-        generate(self.store, self.day, model)
-        self.assertEqual(2, len(model.calls))
-
-    def test_one_correction_and_persistent_limit(self):
-        model = FakeModel(invalid=True)
-        generate(self.store, self.day, model)
-        record = self.store.get(self.day)
-        self.assertEqual("failed", record["status"])
-        self.assertEqual(2, record["attempt_count"])
-        self.assertEqual(["draft", "draft"], [c[0] for c in model.calls])
-        self.assertTrue(model.calls[1][2])
-        self.store.close()
-        self.store = Store(self.root / "lessons.sqlite3")
-        generate(self.store, self.day, model)
-        self.assertEqual(2, len(model.calls))
-        with self.assertRaises(ValueError):
-            self.publish(FakeSender(), self.root / "vault")
-
-    def test_failed_reviews_allow_only_four_calls(self):
-        model = FakeModel(reject=True)
-        generate(self.store, self.day, model)
-        self.assertEqual(["draft", "review", "draft", "review"], [c[0] for c in model.calls])
-        self.assertEqual("failed", self.store.get(self.day)["status"])
-        self.assertTrue(any("exactly one" in e for e in self.store.get(self.day)["failure_reasons"]))
-
-    def test_corrected_draft_can_pass_without_further_generation(self):
-        from unittest.mock import patch
-        model = FakeModel()
-        bad = sample()
-        del bad["questions"][0]["options"]["D"]
-        with patch.object(model, "draft", side_effect=[bad, sample()]) as draft:
-            generate(self.store, self.day, model)
-            self.assertEqual(2, draft.call_count)
-            self.assertTrue(any("q1.options" in reason for reason in draft.call_args.args[1]))
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        self.assertEqual(2, self.store.get(self.day)["attempt_count"])
-
-    def test_correction_feedback_survives_an_outage_and_restart(self):
-        from unittest.mock import patch
-        model = FakeModel()
-        bad = sample()
-        del bad["questions"][0]["options"]["D"]
-        with patch.object(model, "draft", side_effect=[bad, TimeoutError("offline")]):
-            generate(self.store, self.day, model)
-        self.store.close()
-        self.store = Store(self.root / "lessons.sqlite3")
-        generate(self.store, self.day, model)
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        self.assertEqual(2, self.store.get(self.day)["attempt_count"])
-        self.assertTrue(any("q1.options" in reason for reason in model.calls[0][2]))
-
-    def test_review_outage_resumes_saved_draft_and_preserves_model_identity(self):
-        from unittest.mock import patch
-        model = FakeModel()
-        with patch.object(model, "review", side_effect=TimeoutError("offline")):
-            generate(self.store, self.day, model)
-        self.assertEqual("reviewing", self.store.get(self.day)["phase"])
-        model.generation_model = "another-generator"
-        generate(self.store, self.day, model)
-        self.assertEqual(["draft", "review"], [c[0] for c in model.calls])
-        self.assertEqual("test-generator", self.store.get(self.day)["lesson"]["generation_model"])
-        self.assertEqual(1, self.store.get(self.day)["attempt_count"])
-
-    def test_model_outage_is_retryable_without_consuming_correction(self):
-        model = FakeModel(outage=True)
-        generate(self.store, self.day, model)
-        self.assertEqual("failed", self.store.get(self.day)["status"])
-        self.assertEqual(1, self.store.get(self.day)["attempt_count"])
-        model.outage = False
-        generate(self.store, self.day, model)
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        self.assertEqual(1, self.store.get(self.day)["attempt_count"])
-
-    def test_saved_ready_lesson_delivers_without_model(self):
-        self.ready()
-        sender = FakeSender()
-        self.publish(sender, self.root / "vault")
-        record = self.store.get(self.day)
-        self.assertEqual("sent", record["email_status"])
-        self.assertEqual("written", record["markdown_status"])
-        self.assertTrue((self.root / "vault/Lessons/2026/10/2026-10-09.md").exists())
-        self.assertIsNotNone(record["first_published_at"])
-        self.assertEqual(6, len(self.store.review_items()))
-        self.publish(sender, self.root / "vault")
-        self.assertEqual(1, len(sender.messages))
-        self.assertEqual(6, len(self.store.review_items()))
-
-    def test_channel_retry_keeps_same_bytes_and_skips_success(self):
-        self.ready()
-        sender = FakeSender([DefiniteFailure("rejected"), "gmail-2"])
-        vault = self.root / "vault"
-        self.publish(sender, vault)
-        self.assertEqual("failed", self.store.get(self.day)["email_status"])
-        self.assertEqual("written", self.store.get(self.day)["markdown_status"])
-        path = vault / "Lessons/2026/10/2026-10-09.md"
-        modified = path.stat().st_mtime_ns
-        self.publish(sender, vault)
-        self.assertEqual(sender.messages[0], sender.messages[1])
-        self.assertEqual(modified, path.stat().st_mtime_ns)
-        self.assertEqual(6, len(self.store.review_items()))
-
-    def test_both_failed_channels_do_not_count_as_publication(self):
-        self.ready()
-        vault = self.root / "vault"
-        path = vault / "Lessons/2026/10/2026-10-09.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("User's existing file")
-        self.publish(FakeSender([DefiniteFailure("rejected")]), vault)
-        self.assertIsNone(self.store.get(self.day)["first_published_at"])
-        self.assertEqual([], self.store.review_items())
-        self.assertEqual("仕事", self.store.assignment("2026-10-10")["theme"])
-
-    def test_unknown_send_and_crash_never_auto_resend(self):
-        self.ready()
-        sender = FakeSender([UncertainSend("connection lost")])
-        self.publish(sender)
-        self.assertEqual("unknown", self.store.get(self.day)["email_status"])
-        self.publish(sender)
-        self.assertEqual(1, len(sender.messages))
-        self.store.update(self.day, email_status="sending")
-        self.store.recover_inflight()
-        self.assertEqual("unknown", self.store.get(self.day)["email_status"])
-
-    def test_user_edit_and_personal_notes_are_preserved(self):
-        self.ready()
-        vault = self.root / "vault"
-        path = vault / "Lessons/2026/10/2026-10-09.md"
-        path.parent.mkdir(parents=True)
-        path.write_text("My existing lesson")
-        notes = vault / "Notes/2026-10-09.md"
-        notes.parent.mkdir()
-        notes.write_text("My private thoughts")
-        sender = FakeSender()
-        self.publish(sender, vault)
-        self.assertEqual("My existing lesson", path.read_text())
-        self.assertEqual("My private thoughts", notes.read_text())
-        self.assertEqual("failed", self.store.get(self.day)["markdown_status"])
-        self.assertEqual("sent", self.store.get(self.day)["email_status"])
-
-    def test_index_failure_retries_without_rewriting_lesson(self):
-        self.ready()
-        vault = self.root / "vault"
-        vault.mkdir()
-        index = vault / "Index.md"
-        index.write_text("My custom index")
-        sender = FakeSender()
-        self.publish(sender, vault)
-        record = self.store.get(self.day)
-        self.assertEqual("written", record["markdown_status"])
-        self.assertEqual("failed", record["index_status"])
-        lesson_path = Path(record["markdown_path"])
-        modified = lesson_path.stat().st_mtime_ns
-        index.unlink()  # Explicitly resolve the conflict.
-        self.publish(sender, vault)
-        self.assertEqual("written", self.store.get(self.day)["index_status"])
-        self.assertEqual(modified, lesson_path.stat().st_mtime_ns)
-        self.assertEqual(1, len(sender.messages))
-
-    def test_rotation_advances_only_once_on_publication(self):
-        self.ready()
-        self.assertEqual("仕事", self.store.assignment("2026-10-10")["theme"])
-        self.publish(FakeSender())
-        assignment = self.store.assignment("2026-10-10")
-        self.assertEqual("社会", assignment["theme"])
-        self.assertEqual("usage", assignment["slots"][3]["type"])
-        refs = [s for s in assignment["slots"] if s["review_of"]]
-        self.assertEqual(2, len(refs))
-        self.assertEqual(["q1", "q2"], [s["review_of"]["question_id"] for s in refs])
-
-    def test_review_delays_start_at_actual_review_publication(self):
-        self.ready()
-        self.publish(FakeSender())
-        assignment = self.store.assignment("2026-10-11")
-        lesson = sample()
-        lesson.update(date="2026-10-11", lesson_id="n1-2026-10-11", theme=assignment["theme"])
-        for q, slot in zip(lesson["questions"], assignment["slots"]):
-            q.update(review_of=slot["review_of"])
-        self.store.begin("2026-10-11", assignment)
-        self.store.update("2026-10-11", lesson=lesson, status="ready", phase="ready")
-        now = datetime(2026, 10, 11, 8, tzinfo=ZoneInfo("Asia/Hong_Kong"))
-        deliver(self.store, "2026-10-11", FakeSender(), None, "a@example.test", "b@example.test", now)
-        item = next(r for r in self.store.review_items() if r["question_id"] == "q1")
-        self.assertEqual(1, item["stage"])
-        self.assertEqual("2026-10-14", item["due_date"])
-
-    def test_review_sequence_completes_after_four_publications(self):
-        self.ready()
-        self.publish(FakeSender())
-        for stage, day, next_due in ((1, "2026-10-10", "2026-10-13"),
-                                     (2, "2026-10-13", "2026-10-20"),
-                                     (3, "2026-10-20", "2026-11-03"),
-                                     (4, "2026-11-03", None)):
-            lesson = sample()
-            lesson.update(date=day, lesson_id="n1-" + day)
-            for i, q in enumerate(lesson["questions"]):
-                if i < 2:
-                    q["review_of"] = {"lesson_id": "n1-2026-10-09", "question_id": q["id"]}
-                else:
-                    q["target"] += day
-            self.store.begin(day, self.store.assignment(day))
-            self.store.update(day, lesson=lesson, status="ready", phase="ready")
-            moment = datetime.fromisoformat(day + "T08:00:00+08:00")
-            self.store.channel_success(day, moment, email_status="sent")
-            item = next(r for r in self.store.review_items() if r["question_id"] == "q1")
-            self.assertEqual(stage, item["stage"])
-            self.assertEqual(next_due, item["due_date"])
-            self.store.channel_success(day, moment, markdown_status="written")
-            item = next(r for r in self.store.review_items() if r["question_id"] == "q1")
-            self.assertEqual(stage, item["stage"])
-
-    def test_window_generates_before_eight_but_does_not_publish(self):
-        sender = FakeSender()
-        daily(self.store, FakeModel(), sender, self.root / "vault", "a@example.test", "b@example.test", self.now.replace(hour=7, minute=45))
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        self.assertEqual([], sender.messages)
-        daily(self.store, None, sender, self.root / "vault", "a@example.test", "b@example.test", self.now)
-        self.assertEqual(1, len(sender.messages))
-
-    def test_late_run_records_missed_day_without_backlog(self):
-        model, sender = FakeModel(), FakeSender()
-        result = daily(self.store, model, sender, self.root / "vault", "a@example.test", "b@example.test", self.now.replace(hour=12, minute=1))
-        self.assertEqual("missed", result)
+    def test_ready_reuse_and_independent_delivery(self):
+        record = self.ready()
+        self.assertEqual('ready', record['phase'])
+        self.assertEqual(1, record['attempt_count'])
+        model = Model()
+        generate(self.store, DAY, model)
         self.assertEqual([], model.calls)
-        self.assertEqual([], sender.messages)
-        self.assertTrue(self.store.get(self.day)["failure_reasons"])
+        self.sender.prepare_error = ServiceError('OAuth rejected: invalid_grant')
+        record = self.publish(email=True, vault=True)
+        self.assertEqual('failed', record['email_status'])
+        self.assertEqual('written', record['markdown_status'])
+        self.assertEqual('written', record['index_status'])
+        self.assertEqual(6, len(self.store.review_items()))
+        note = Path(record['markdown_path'])
+        before = note.stat().st_mtime_ns
+        self.sender.prepare_error = None
+        record = self.publish(email=True, vault=True)
+        self.assertEqual('sent', record['email_status'])
+        self.assertEqual(before, note.stat().st_mtime_ns)
+        self.assertEqual(6, len(self.store.review_items()))
+        self.assertEqual(NOW.isoformat(), record['first_published_at'])
 
-    def test_finished_day_does_not_become_missed_after_noon(self):
+    def test_setup_failure_before_actual_draft_and_service_retry_budget(self):
+        model = Model()
+        model.prepare = lambda phase: (_ for _ in ()).throw(InputError('Missing llm_api_key'))
+        record = generate(self.store, DAY, model)
+        self.assertEqual(0, record['attempt_count'])
+        self.assertEqual('generating', record['phase'])
+        model = Model()
+        model.draft_error = ServiceError('HTTP 429: insufficient_quota')
+        record = generate(self.store, DAY, model)
+        self.assertEqual(1, record['attempt_count'])
+        self.assertIn('insufficient_quota', record['failure_reasons'][0])
+        self.restart()
+        record = self.ready()
+        self.assertEqual('ready', record['phase'])
+        self.assertEqual(1, record['attempt_count'])
+
+    def test_one_correction_survives_interrupted_corrected_request(self):
+        model = Model()
+        bad = lesson()
+        bad['questions'][0]['options'].pop('D')
+        results = iter([bad, ServiceError('HTTP 429: quota')])
+        def draft(*args):
+            value = next(results)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        model.draft = draft
+        record = generate(self.store, DAY, model)
+        self.assertEqual(2, record['attempt_count'])
+        self.assertEqual('generating', record['phase'])
+        feedback = record['correction_feedback']
+        self.assertTrue(feedback)
+        self.restart()
+        model = Model()
+        record = generate(self.store, DAY, model)
+        self.assertEqual(feedback, model.calls[0][2])
+        self.assertEqual(2, record['attempt_count'])
+        self.assertEqual('ready', record['phase'])
+
+    def test_second_content_failure_is_terminal_and_saved_review_decision_is_atomic(self):
+        model = Model()
+        model.verdict = {'questions': []}
+        record = generate(self.store, DAY, model)
+        self.assertEqual('failed', record['phase'])
+        self.assertEqual(2, record['attempt_count'])
+        self.assertEqual({'questions': []}, record['review_result'])
+        self.restart()
+        model = Model()
+        self.assertEqual('failed', generate(self.store, DAY, model)['phase'])
+        self.assertEqual([], model.calls)
+
+    def test_review_service_failure_resumes_without_redrafting(self):
+        model = Model()
+        model.review_error = ServiceError('review HTTP 503: capacity')
+        record = generate(self.store, DAY, model)
+        self.assertEqual('reviewing', record['phase'])
+        self.restart()
+        model = Model()
+        record = generate(self.store, DAY, model)
+        self.assertEqual(['review'], [call[0] for call in model.calls])
+        self.assertEqual('ready', record['phase'])
+
+    def test_saved_content_edit_blocks_all_unfinished_delivery(self):
+        record = self.ready()
+        changed = record['lesson']
+        changed['questions'][0]['answer_ja'] += ' changed'
+        self.store.update(DAY, lesson=changed)
+        record = self.publish(email=True, vault=True)
+        self.assertTrue(any('binding' in text for text in record['failure_reasons']))
+        self.assertEqual([], self.sender.messages)
+        self.assertEqual([], list(self.vault.iterdir()))
+
+    def test_unknown_email_requires_resolution_and_preserves_bytes(self):
         self.ready()
-        sender = FakeSender()
-        self.publish(sender, self.root / "vault")
-        result = daily(self.store, None, sender, self.root / "vault", "a@example.test", "b@example.test", self.now.replace(hour=13))
-        self.assertEqual("published", result)
-        self.assertEqual(1, len(sender.messages))
+        self.sender.send_error = DeliveryError('Gmail read lost', uncertain=True)
+        record = self.publish(email=True)
+        self.assertEqual('unknown', record['email_status'])
+        self.assertIsNone(record['first_published_at'])
+        frozen = record['message_bytes']
+        self.sender.send_error = None
+        self.publish(email=True)
+        self.assertEqual(1, len(self.sender.messages))
+        resolve_email(self.store, DAY, mailbox_checked=True, retry=True, now=NOW)
+        record = self.publish(email=True)
+        self.assertEqual([frozen, frozen], self.sender.messages)
+        self.assertEqual('sent', record['email_status'])
 
-    def test_missed_day_is_recorded_once(self):
-        late = self.now.replace(hour=13)
-        args = (self.store, FakeModel(), FakeSender(), None, "a@example.test", "b@example.test", late)
-        self.assertEqual("missed", daily(*args))
-        self.assertEqual("closed", daily(*args))
-        self.assertEqual(1, len(self.store.get(self.day)["failure_reasons"]))
+    def test_frozen_email_destination_mismatch_before_service(self):
+        self.ready()
+        self.sender.send_error = DeliveryError('Gmail HTTP 429: rate limit')
+        record = self.publish(email=True)
+        self.assertEqual('failed', record['email_status'])
+        self.config.recipient = 'changed@example.com'
+        self.sender.send_error = None
+        record = self.publish(email=True)
+        self.assertIn('recipient', record['email_error'])
+        self.assertEqual(1, self.sender.preparations)
+        self.assertEqual(1, len(self.sender.messages))
 
-    def test_generation_crossing_cutoff_preserves_ready_lesson_without_delivery(self):
-        sender = FakeSender()
-        before = self.now.replace(hour=11, minute=59)
-        after = self.now.replace(hour=12, minute=1)
-        result = daily(self.store, FakeModel(), sender, self.root / "vault", "a@example.test", "b@example.test", before,
-                       current_time=lambda: after)
-        self.assertEqual("missed", result)
-        self.assertEqual("ready", self.store.get(self.day)["status"])
-        self.assertEqual([], sender.messages)
+    def test_invalid_resolution_is_read_only_and_late_confirmation_keeps_anchor(self):
+        self.ready()
+        self.sender.send_error = DeliveryError('lost', uncertain=True)
+        self.publish(email=True)
+        for args in ({'retry': True, 'accepted_at': NOW}, {'accepted_id': ' ', 'accepted_at': NOW},
+                     {'accepted_id': 'id', 'accepted_at': NOW - timedelta(seconds=1)},
+                     {'accepted_id': 'id', 'accepted_at': NOW + timedelta(seconds=1)},
+                     {'accepted_id': 'id', 'accepted_at': NOW.replace(tzinfo=None)}):
+            with self.subTest(args=args), self.assertRaises(InputError):
+                resolve_email(self.store, DAY, mailbox_checked=True, now=NOW, **args)
+        later = NOW + timedelta(hours=1)
+        record = publish(self.store, DAY, self.config, self.sender, vault=True, now=lambda: later)
+        due_dates = [item['due_date'] for item in self.store.review_items()]
+        resolve_email(self.store, DAY, mailbox_checked=True, accepted_id='confirmed', accepted_at=NOW, now=later)
+        record = self.store.get(DAY)
+        self.assertEqual(later.isoformat(), record['first_published_at'])
+        self.assertEqual(NOW.isoformat(), record['email_completed_at'])
+        self.assertEqual(due_dates, [item['due_date'] for item in self.store.review_items()])
 
-    def test_lock_rejects_overlapping_run(self):
-        with run_lock(self.store.path):
-            with self.assertRaises(RuntimeError):
-                with run_lock(self.store.path):
-                    self.fail("concurrent daily run acquired lock")
+    def test_vault_setup_repair_binding_and_edited_index(self):
+        self.ready()
+        self.config.vault_path = self.root / 'missing'
+        record = self.publish(vault=True)
+        self.assertFalse(self.config.vault_path.exists())
+        self.assertIsNone(record['vault_root'])
+        self.config.vault_path = self.vault
+        (self.vault / 'Index.md').write_text('personal index')
+        record = self.publish(vault=True)
+        self.assertEqual('written', record['markdown_status'])
+        self.assertEqual('failed', record['index_status'])
+        self.assertEqual('personal index', (self.vault / 'Index.md').read_text())
+        second = self.root / 'second'
+        second.mkdir()
+        self.config.vault_path = second
+        record = self.publish(vault=True)
+        self.assertIn('destination', record['index_error'])
+        self.assertEqual([], list(second.iterdir()))
 
+    def test_file_write_checkpoint_recovers_without_overwriting_an_edit(self):
+        self.ready()
+        from n1_daily.files import write_file
+        original = self.store.finish_file
+        def crash(*args):
+            raise KeyboardInterrupt()
+        self.store.finish_file = crash
+        with self.assertRaises(KeyboardInterrupt):
+            self.publish(vault=True)
+        self.store.finish_file = original
+        record = self.publish(vault=True)
+        self.assertEqual('written', record['markdown_status'])
+        note = Path(record['markdown_path'])
+        note.write_text('my edits')
+        self.publish(vault=True)
+        self.assertEqual('my edits', note.read_text())
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_midnight_stops_next_channel_but_preserves_started_send(self):
+        self.ready()
+        current = [NOW]
+        original = self.sender.send
+        def send(message):
+            result = original(message)
+            current[0] += timedelta(days=1)
+            return result
+        self.sender.send = send
+        record = publish(self.store, DAY, self.config, self.sender, email=True, vault=True, now=lambda: current[0])
+        self.assertEqual('sent', record['email_status'])
+        self.assertEqual('pending', record['markdown_status'])
+        self.assertTrue(any('date' in reason for reason in record['failure_reasons']))
+
+    def test_lock_blocks_other_dates_and_readonly_does_not_recover(self):
+        self.ready()
+        self.store.update(DAY, email_status='sending')
+        with run_lock(self.path):
+            with self.assertRaises(InputError):
+                with run_lock(self.path):
+                    self.fail('overlap was permitted')
+            reader = Store(self.path, readonly=True)
+            try:
+                self.assertEqual('sending', reader.get(DAY)['email_status'])
+            finally:
+                reader.close()
+        with run_lock(self.path):
+            self.store.recover_inflight()
+        self.assertEqual('unknown', self.store.get(DAY)['email_status'])
+
+    def test_model_refusal_consumes_one_correction_then_stops(self):
+        model = Model()
+        model.draft_error = ModelOutputError('LLM refusal: unable to supply this lesson')
+        record = generate(self.store, DAY, model)
+        self.assertEqual(2, len(model.calls))
+        self.assertEqual(2, record['attempt_count'])
+        self.assertEqual('failed', record['phase'])
+        self.assertIn('unable to supply', record['failure_reasons'][0])
+
+    def test_index_retry_does_not_contact_gmail_or_rewrite_note(self):
+        self.ready()
+        from n1_daily.workflow import write_file
+        def fail_index(store, root, path, text):
+            if path.name == 'Index.md':
+                raise OSError('temporary index failure')
+            return write_file(store, root, path, text)
+        with patch('n1_daily.workflow.write_file', side_effect=fail_index):
+            record = self.publish(email=True, vault=True)
+        note = Path(record['markdown_path'])
+        before = note.stat().st_mtime_ns
+        self.assertEqual('failed', record['index_status'])
+        self.config.sender = self.config.recipient = ''
+        self.sender.prepare_error = AssertionError('completed email contacted')
+        record = self.publish(email=True, vault=True)
+        self.assertEqual('written', record['index_status'])
+        self.assertEqual(before, note.stat().st_mtime_ns)
+        self.assertEqual(1, len(self.sender.messages))
+
+    def test_saved_review_stage_snapshot_is_bound_to_readiness(self):
+        self.ready()
+        self.store.update(DAY, review_stages={'tampered/q1': 2})
+        record = self.publish(email=True)
+        self.assertTrue(any('binding' in reason for reason in record['failure_reasons']))
+        self.assertEqual([], self.sender.messages)

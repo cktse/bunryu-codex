@@ -1,299 +1,222 @@
-"""Local previews are safe by default. Live channels require explicit flags."""
-
 import argparse
-from datetime import date, datetime
-import json
+from contextlib import closing
+import hashlib
 from pathlib import Path
 import plistlib
 import sqlite3
 import subprocess
 import sys
-from zoneinfo import ZoneInfo
 
-from .config import Config, ConfigError, SecretSource, check_private_path
-from .content import check_lesson, sample_assignment
-from .files import atomic_write
-from .llm import JsonModel
-from .render import message_bytes, render_html, render_markdown, render_text
-from .services import DefiniteFailure, GmailSender
+from .config import Config, SecretSource, private_path, read_object
+from .content import assignment, canonical, check_lesson, valid_date
+from .errors import InputError
+from .gmail import Sender
+from .http import sanitize
+from .jsonio import dumps
+from .llm import Model
+from .render import email_message, render_html, render_markdown, render_text
 from .store import Store, run_lock
-from .workflow import close_window, daily, deliver, generate
+from .workflow import clock, delivery_complete, generate, publish, resolve_email, validate_resolution
+
+PROJECT = Path(__file__).resolve().parent.parent
+STATUS_FIELDS = ('date', 'status', 'phase', 'attempt_count', 'first_published_at', 'failure_reasons',
+                 'context_reconstructed', 'email_status', 'email_attempt_at', 'email_completed_at', 'email_error',
+                 'markdown_status', 'markdown_attempt_at', 'markdown_completed_at', 'markdown_error',
+                 'index_status', 'index_attempt_at', 'index_completed_at', 'index_error')
 
 
-class ContentCheckFailure(ValueError):
-    """Checks ran and rejected content; distinct from an input error."""
+def date_argument(value):
+    if not valid_date(value):
+        raise argparse.ArgumentTypeError('date must use YYYY-MM-DD')
+    return value
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Daily original JLPT N1 practice")
-    commands = root.add_subparsers(dest="command", required=True)
-    for name in ("preview", "validate", "generate", "publish", "daily", "status", "resolve-email", "schedule"):
+    root = argparse.ArgumentParser(prog='python -m n1_daily')
+    commands = root.add_subparsers(dest='command', required=True)
+    for name in ('preview', 'validate', 'generate', 'publish', 'daily', 'status', 'resolve-email', 'schedule'):
         command = commands.add_parser(name)
-        command.add_argument("--config", type=Path, help="explicit path to config.json")
-        command.add_argument("--secrets", type=Path, help="explicit path to private secrets.json; loaded only for service requests")
-        command.add_argument("--db", type=Path)
-        if name in ("preview", "validate"):
-            input_choice = command.add_mutually_exclusive_group()
-            input_choice.add_argument("--date", type=date.fromisoformat)
-            input_choice.add_argument("--lesson", type=Path)
-        elif name not in ("schedule", "daily"):
-            command.add_argument("--date", type=date.fromisoformat)
-        if name in ("preview", "schedule"):
-            command.add_argument("--output", type=Path)
-        if name in ("preview", "publish", "daily"):
-            command.add_argument("--ruby-mode", choices=("html", "parentheses"))
-        if name in ("publish", "daily"):
-            command.add_argument("--activate-email", action="store_true")
-            command.add_argument("--activate-vault", action="store_true")
-        if name == "resolve-email":
+        for field in ('config', 'secrets', 'db'):
+            command.add_argument('--' + field, type=Path)
+        if name in ('preview', 'validate'):
+            selector = command.add_mutually_exclusive_group()
+            selector.add_argument('--date', type=date_argument)
+            selector.add_argument('--lesson', type=Path)
+        elif name != 'schedule':
+            command.add_argument('--date', type=date_argument)
+        if name in ('preview', 'schedule'):
+            command.add_argument('--output', type=Path)
+        if name in ('preview', 'publish', 'daily'):
+            command.add_argument('--ruby-mode', choices=('html', 'parentheses'))
+        if name in ('publish', 'daily'):
+            command.add_argument('--activate-email', action='store_true')
+            command.add_argument('--activate-vault', action='store_true')
+        if name == 'resolve-email':
             choice = command.add_mutually_exclusive_group(required=True)
-            choice.add_argument("--accepted-id")
-            choice.add_argument("--retry", action="store_true")
-            command.add_argument("--accepted-at", type=datetime.fromisoformat)
-            command.add_argument("--mailbox-checked", action="store_true")
+            choice.add_argument('--retry', action='store_true')
+            choice.add_argument('--accepted-id')
+            command.add_argument('--accepted-at')
+            command.add_argument('--mailbox-checked', action='store_true')
     return root
 
 
-def notification(message):
-    print(message, file=sys.stderr)
-    if sys.platform == "darwin":
+def notification():
+    if sys.platform == 'darwin':
         try:
-            subprocess.run(["osascript", "-e", f'display notification {json.dumps(message)} with title "Daily N1"'],
-                           timeout=5, capture_output=True, check=False)
+            subprocess.run(['osascript', '-e', 'display notification "Daily N1 needs attention; inspect status for the saved reasons." with title "Daily N1"'],
+                           capture_output=True, timeout=5, check=False)
         except (OSError, subprocess.TimeoutExpired):
             pass
 
 
-class ConfiguredModel:
-    def __init__(self, config, secrets):
-        self.config, self.secrets = config, secrets
-        self.generation_model = config.generation_model
-        self.review_model = config.review_model
-        self._client = None
-
-    def client(self):
-        if self._client is None:
-            self.config.require("llm_endpoint", "generation_model", "review_model")
-            credentials = self.secrets.require("llm_api_key")
-            self._client = JsonModel(self.config.llm_endpoint, credentials.llm_api_key,
-                                     self.generation_model, self.review_model, self.config.timeout_seconds,
-                                     generation_reasoning_effort=self.config.generation_reasoning_effort,
-                                     review_reasoning_effort=self.config.review_reasoning_effort)
-        return self._client
-
-    def draft(self, context, failures, previous):
-        return self.client().draft(context, failures, previous)
-
-    def review(self, lesson, context):
-        return self.client().review(lesson, context)
-
-    def prepare(self):
-        self.client()
+def report(record):
+    print(f"{record['date']}: {record['status']} (phase {record['phase']}, draft {record['attempt_count']}); "
+          f"email={record['email_status']}, Markdown={record['markdown_status']}, index={record['index_status']}")
+    reasons = record['failure_reasons'] + [record[field] for field in ('email_error', 'markdown_error', 'index_error') if record[field]]
+    for reason in dict.fromkeys(reasons):
+        print(sanitize(reason), file=sys.stderr)
 
 
-class ConfiguredSender:
-    def __init__(self, config, secrets):
-        self.config, self.secrets = config, secrets
-        self._client = None
-
-    def prepare(self):
-        if self._client is None:
-            try:
-                self.config.require("sender", "recipient", "google_client_id")
-                credentials = self.secrets.require("google_client_secret", "google_refresh_token")
-            except ConfigError as error:
-                raise DefiniteFailure(str(error)) from None
-            self._client = GmailSender(self.config.google_client_id, credentials.google_client_secret,
-                                       credentials.google_refresh_token, self.config.timeout_seconds)
-
-    def send(self, payload):
-        self.prepare()
-        return self._client.send(payload)
-
-
-def channels(args, config, secrets):
-    if not args.activate_email and not args.activate_vault:
-        raise ValueError("Live publication requires --activate-email and/or --activate-vault after explicit user activation")
-    sender, vault = None, None
-    if args.activate_email:
-        sender = ConfiguredSender(config, secrets)
-    if args.activate_vault:
-        vault = config.vault_path
-    return sender, vault
+def preview_input(args, config):
+    if not args.date and not args.lesson:
+        lesson = canonical(read_object(PROJECT / 'examples' / 'sample-lesson.json'))
+        return lesson, check_lesson(lesson, assignment(lesson['date'])), 'Sample assignment checked; production history and LLM review were not checked.'
+    if args.lesson:
+        lesson = canonical(read_object(args.lesson.expanduser().resolve()))
+        errors = check_lesson(lesson)
+        if errors or not (args.config or args.db):
+            return lesson, errors, 'Standalone structure checked; saved assignment, production history, and LLM review were not checked.'
+        day = lesson['date']
+    else:
+        day = args.date
+    with closing(Store(config.check_database(), readonly=True)) as store:
+        record = store.get(day)
+        if not record or (not args.lesson and record['phase'] != 'ready'):
+            raise InputError('Saved preview requires an existing ready lesson; contextual validation requires its saved assignment')
+        if not args.lesson:
+            lesson = record['lesson']
+        errors = check_lesson(lesson, record['assignment'], store.history(day))
+    return lesson, errors, 'Mechanical content, saved assignment, and published history checked; linguistic correctness was not checked.'
 
 
-def preview_lesson(args, config):
-    def checked(lesson, assignment=None, history=None):
-        errors = check_lesson(lesson, assignment, history)
-        if errors:
-            raise ContentCheckFailure("\n".join(errors))
-
-    def read_record(day, require_ready):
-        config.check_database_path()
-        store = Store(config.db_path, readonly=True)
-        try:
-            record = store.get(day)
-            if not record or (require_ready and record["status"] != "ready"):
-                raise ValueError("The requested date has no saved ready lesson" if require_ready else "No saved assignment for the input date")
-            return record, store.history(before=day, published_only=True)
-        finally:
-            store.close()
-
-    full_scope = "All mechanical checks passed against the saved assignment and prior published history; linguistic review is still required"
-    if args.date:
-        record, history = read_record(args.date.isoformat(), True)
-        checked(record["lesson"], record["assignment"], history)
-        return record["lesson"], full_scope
-
-    path = args.lesson or Path(__file__).parents[1] / "examples/sample-lesson.json"
-
-    def unique_keys(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("Lesson JSON contains duplicate keys")
-            result[key] = value
-        return result
-
-    lesson = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_keys)
-    if not args.lesson:
-        assignment = sample_assignment(lesson.get("date", "")) if isinstance(lesson, dict) else sample_assignment("")
-        checked(lesson, assignment)
-        return lesson, "Sample structure and assignment checks passed; production-history checks and LLM review were not performed"
-    checked(lesson)
-    if args.config or args.db:
-        record, history = read_record(lesson["date"], False)
-        checked(lesson, record["assignment"], history)
-        return lesson, full_scope
-    return lesson, "Local structure checks passed; assignment/history checks and LLM review were not performed"
+def preview(args, config):
+    lesson, errors, scope = preview_input(args, config)
+    print(scope)
+    if errors:
+        for error in errors:
+            print(sanitize(error), file=sys.stderr)
+        return 1
+    if args.command == 'validate':
+        print('Valid.')
+        return 0
+    output = config.check_output(args.output or config.preview_path)
+    output.mkdir(parents=True, exist_ok=True)
+    artifacts = {'lesson.html': render_html(lesson).encode(), 'lesson.md': render_markdown(lesson, config.ruby_mode).encode(),
+                 'lesson.txt': render_text(lesson).encode(), 'lesson.json': (dumps(canonical(lesson)) + '\n').encode(),
+                 'lesson.eml': email_message(lesson, config.sender or 'preview@example.test', config.recipient or 'reader@example.test')}
+    for name, data in artifacts.items():
+        destination = config.check_output(output / name)
+        destination.write_bytes(data)
+    print(f'Preview: {output}')
+    return 0
 
 
-def export_schedule(args, config):
-    if not args.output or not args.secrets:
-        raise ValueError("Schedule export requires --output and --secrets file paths")
-    secret_path = check_private_path(args.secrets, config.vault_path)
-    config.check_preview_path(args.output)
-    # This only creates a reviewable artifact. Installing it requires a later
-    # explicit activation request; the application never invokes launchctl.
-    data = {"Label": "local.n1-daily", "ProgramArguments": [sys.executable, "-m", "n1_daily", "daily",
-            "--config", str(args.config.expanduser().resolve()), "--secrets", str(secret_path),
-            "--activate-email", "--activate-vault"],
-            "WorkingDirectory": str(Path(__file__).parents[1]), "RunAtLoad": True,
-            "StartInterval": 60, "StandardOutPath": "/tmp/n1-daily-launchd.log",
-            "StandardErrorPath": "/tmp/n1-daily-launchd-error.log"}
+def schedule(args, config):
+    if not args.config or not args.secrets or not args.output:
+        raise InputError('schedule requires --config, --secrets, and --output')
+    output = config.check_output(args.output)
+    secret_path = private_path(args.secrets, config.vault_path)
+    arguments = [str(Path(sys.executable).resolve()), '-m', 'n1_daily', 'daily',
+                 '--config', str(args.config.expanduser().resolve()), '--secrets', str(secret_path),
+                 '--activate-email', '--activate-vault']
     if args.db:
-        data["ProgramArguments"] += ["--db", str(args.db.expanduser().resolve())]
-    atomic_write(args.output, plistlib.dumps(data))
-    print(f"Exported inactive schedule to {args.output}; no job was installed or loaded")
+        arguments += ['--db', str(config.db_path)]
+    template = {'Label': 'local.n1-daily', 'ProgramArguments': arguments, 'WorkingDirectory': str(PROJECT),
+                'RunAtLoad': True, 'StartInterval': 60, 'StandardOutPath': '/tmp/n1-daily-launchd.log',
+                'StandardErrorPath': '/tmp/n1-daily-launchd-error.log'}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(plistlib.dumps(template))
+    print(f'Inactive template: {output}. Edit timing/channels before installing: it runs immediately on load and every 60 seconds, with both delivery channels activated.')
+    return 0
 
 
-def main(arguments=None):
-    args = parser().parse_args(arguments)
+def writable(args, config, day):
+    if args.command in ('publish', 'resolve-email') and not config.db_path.is_file():
+        raise InputError('This command requires an existing database')
+    with run_lock(config.db_path):
+        if args.command == 'resolve-email':
+            # Validate even the saved timestamps read-only before migrations or send recovery.
+            with closing(Store(config.db_path, readonly=True)) as reader:
+                validate_resolution(reader.get(day), mailbox_checked=args.mailbox_checked, retry=args.retry,
+                                    accepted_id=args.accepted_id, accepted_at=args.accepted_at, now=clock())
+        with closing(Store(config.db_path, create=args.command in ('generate', 'daily'))) as store:
+            if args.command != 'resolve-email':
+                store.recover_inflight()
+            secrets = SecretSource(args.secrets, config)
+            if args.command == 'resolve-email':
+                record = resolve_email(store, day, mailbox_checked=args.mailbox_checked, retry=args.retry,
+                                       accepted_id=args.accepted_id, accepted_at=args.accepted_at, now=clock())
+                report(record)
+                return 0
+            if args.command in ('generate', 'daily'):
+                record = generate(store, day, Model(config, secrets))
+                if record['phase'] != 'ready':
+                    report(record)
+                    notify_failure(store, record, args.command)
+                    return 1
+            if args.command in ('publish', 'daily'):
+                record = publish(store, day, config, Sender(config, secrets), email=args.activate_email,
+                                 vault=args.activate_vault, now=clock)
+                complete = delivery_complete(record, args.activate_email, args.activate_vault)
+            else:
+                complete = True
+            report(record)
+            if not complete:
+                notify_failure(store, record, args.command)
+            return 0 if complete else 1
+
+
+def notify_failure(store, record, command):
+    fields = ('status', 'phase', 'failure_reasons', 'email_status', 'email_error', 'markdown_status', 'markdown_error', 'index_status', 'index_error')
+    value = hashlib.sha256(dumps({key: record[key] for key in fields}).encode()).hexdigest()
+    if command != 'daily' or value != record['notification_fingerprint']:
+        notification()
+        store.update(record['date'], notification_fingerprint=value)
+
+
+def main(argv=None):
     try:
-        if args.command in ("generate", "publish", "daily", "schedule") and not args.config:
-            raise ValueError(f"{args.command} requires an explicit --config file path")
-        config = Config.from_file(args.config)
+        try:
+            args = parser().parse_args(argv)
+        except SystemExit as exc:
+            return exc.code
+        config = Config.load(args.config) if args.config else Config()
         if args.db:
             config.db_path = args.db.expanduser().resolve()
-        secrets = SecretSource(args.secrets, config)
-        if args.command == "schedule":
-            config.check_database_path()
-            export_schedule(args, config)
-            return 0
-        ruby_mode = getattr(args, "ruby_mode", None) or config.ruby_mode
-        if args.command in ("preview", "validate"):
-            lesson, scope = preview_lesson(args, config)
-            if args.command == "validate":
-                print(scope)
-                return 0
-            output = (args.output or config.preview_path).expanduser().resolve()
-            config.check_preview_path(output)
-            outputs = {"lesson.html": render_html(lesson), "lesson.txt": render_text(lesson),
-                       "lesson.md": render_markdown(lesson, ruby_mode), "lesson.json": json.dumps(lesson, ensure_ascii=False, indent=2)}
-            for name, text in outputs.items():
-                atomic_write(output / name, text.encode("utf-8"))
-            atomic_write(output / "lesson.eml", message_bytes(lesson, config.sender or "preview@example.test", config.recipient or "reader@example.test"))
-            print(f"{scope}\nPreview: {output}\nEmail: lesson.html / lesson.eml\nObsidian: lesson.md\nNo email was sent; the configured vault was untouched")
-            return 0
-        sender, vault = channels(args, config, secrets) if args.command in ("publish", "daily") else (None, None)
-        config.check_database_path()
-        now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
-        day = (getattr(args, "date", None) or now.date()).isoformat()
-        if args.command == "publish" and (day != now.date().isoformat() or not config.publish_time <= now.time() <= config.cutoff_time):
-            raise ValueError("Publication is limited to today's configured window; use preview to view another date")
-        if args.command == "status":
-            store = Store(config.db_path, readonly=True)
-            try:
+        if getattr(args, 'ruby_mode', None):
+            config.ruby_mode = args.ruby_mode
+        config.check_database()
+        if args.command in ('generate', 'publish', 'daily') and not args.config:
+            raise InputError(f'{args.command} requires --config')
+        if args.command in ('publish', 'daily') and not (args.activate_email or args.activate_vault):
+            raise InputError('Publication requires --activate-email and/or --activate-vault')
+        if args.command in ('preview', 'validate'):
+            return preview(args, config)
+        if args.command == 'schedule':
+            return schedule(args, config)
+        today = clock().date().isoformat()
+        day = args.date or today
+        if args.command in ('publish', 'daily') and day != today:
+            raise InputError('Publication is limited to today; automatic backlog delivery is not supported')
+        config.check_database()
+        if args.command == 'status':
+            with closing(Store(config.db_path, readonly=True)) as store:
                 record = store.get(day)
-                if not record:
-                    raise ValueError("No lesson record for this date")
-                print(json.dumps({k: record[k] for k in ("date", "status", "attempt_count", "first_published_at", "failure_reasons", "email_status", "email_error", "markdown_status", "markdown_error", "index_status", "index_error")}, ensure_ascii=False, indent=2))
-            finally:
-                store.close()
+                if record is None:
+                    raise InputError(f'No saved record for {day}')
+                print(dumps({key: record[key] for key in STATUS_FIELDS}))
             return 0
-        with run_lock(config.db_path):
-            store = Store(config.db_path)
-            try:
-                store.recover_inflight()
-                if args.command == "generate":
-                    existing = store.get(day)
-                    model = None if existing and (existing["status"] == "ready" or existing["phase"] == "failed") else ConfiguredModel(config, secrets)
-                    record = generate(store, day, model)
-                    print(f"{day}: {record['status']} (draft {record['attempt_count']})")
-                    if record["status"] != "ready":
-                        notification("Lesson generation failed; inspect the recorded reasons with status")
-                        return 1
-                elif args.command == "publish":
-                    current_time = lambda: datetime.now(ZoneInfo("Asia/Hong_Kong"))
-                    record = deliver(store, day, sender, vault, config.sender, config.recipient, now, ruby_mode,
-                                     current_time=current_time, cutoff=config.cutoff_time, vault_requested=args.activate_vault)
-                    print(f"{day}: email={record['email_status']}, Markdown={record['markdown_status']}, index={record['index_status']}")
-                    if (sender and record["email_status"] != "sent") or (args.activate_vault and (record["markdown_status"] != "written" or record["index_status"] != "written")):
-                        after = current_time()
-                        if after.date() != now.date() or after.time() > config.cutoff_time:
-                            close_window(store, day, sender, args.activate_vault)
-                        notification("Lesson delivery remains incomplete; inspect status before retrying")
-                        return 1
-                elif args.command == "daily":
-                    # A ready lesson needs no model configuration or network.
-                    existing = store.get(day)
-                    needs_generation = (config.generate_time <= now.time() <= config.cutoff_time
-                                        and not (existing and (existing["status"] == "ready" or existing["phase"] == "failed")))
-                    model = ConfiguredModel(config, secrets) if needs_generation else None
-                    outcome = daily(store, model, sender, vault, config.sender, config.recipient, now,
-                                    config.generate_time, config.publish_time, config.cutoff_time, ruby_mode,
-                                    current_time=lambda: datetime.now(ZoneInfo("Asia/Hong_Kong")), vault_requested=args.activate_vault)
-                    print(f"{day}: {outcome}")
-                    if outcome in ("failed", "missed", "partial"):
-                        current = store.get(day)
-                        issue_fields = ("status", "failure_reasons", "email_status", "email_error", "markdown_status", "markdown_error", "index_status", "index_error")
-                        if not existing or any(existing[field] != current[field] for field in issue_fields):
-                            notification(f"Daily N1: {outcome}; inspect status")
-                        return 1
-                elif args.command == "resolve-email":
-                    record = store.get(day)
-                    if not record or record["email_status"] != "unknown":
-                        raise ValueError("Only an unknown email outcome can be resolved")
-                    if not args.mailbox_checked:
-                        raise ValueError("Inspect the sending mailbox and specify --mailbox-checked")
-                    if args.retry:
-                        store.update(day, email_status="failed", email_error="Operator authorized retry after mailbox check")
-                    else:
-                        if not args.accepted_id.strip():
-                            raise ValueError("Provide a nonempty Gmail message ID")
-                        if not args.accepted_at or args.accepted_at.tzinfo is None:
-                            raise ValueError("Provide the actual timezone-aware Gmail acceptance time with --accepted-at")
-                        store.channel_success(day, args.accepted_at.astimezone(ZoneInfo("Asia/Hong_Kong")), email_status="sent", gmail_id=args.accepted_id, email_error=None)
-                    print("Recorded the operator's mailbox decision; no email was sent")
-            finally:
-                store.close()
-        return 0
-    except ContentCheckFailure as error:
-        print(f"Content checks failed: {error}", file=sys.stderr)
-        return 1
-    except sqlite3.Error:
-        print("Error: SQLite storage is unavailable or corrupt", file=sys.stderr)
-        return 2
-    except (OSError, ValueError, RuntimeError, KeyError) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        return writable(args, config, day)
+    except (InputError, OSError, sqlite3.Error) as exc:
+        print(sanitize(f'{type(exc).__name__}: {exc}'), file=sys.stderr)
         return 2

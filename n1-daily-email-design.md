@@ -8,6 +8,8 @@ Status: approved implementation baseline. This document defines the first workin
 
 **Reconciliation revision: approved.** Section 9 defines corrections for findings F1–F8 and resolves the associated scope and validation questions. Approval covers offline implementation and tests against sections 1–7, the previously approved revisions, and section 9. Email, real-vault writes, and scheduling still require separate activation.
 
+**Responses API and reasoning-effort revision: proposed, awaiting approval.** Section 10 proposes replacing the Chat Completions adapter with Responses and adding optional, separate generation and review effort settings with `medium` defaults. The three proposed rows in the configuration table are part of that revision. The approved Chat Completions implementation baseline remains in force until explicit approval.
+
 ## Development process
 
 Follow specification-driven development. Every system change starts with an update to this document and a review pause. Implementation and its tests begin only after the user explicitly approves the proposed specification. After approval, use test-driven development and continue until the approved behavior runs locally. Record straightforward implementation choices and concise setup instructions in `README.md`.
@@ -75,9 +77,11 @@ Load nonsecret settings from `config.json` and credentials from `secrets.json`, 
 | `config.json` | `cutoff_time` | String in 24-hour `HH:MM` format; latest permitted start of publication for today's lesson | Optional | `"12:00"` | `"12:00"` |
 | `config.json` | `timeout_seconds` | Finite JSON number greater than zero and at most 300; timeout for each LLM, OAuth, or Gmail HTTP request | Optional | `30` | `45` |
 | `config.json` | `ruby_mode` | String `html` or `parentheses`; selects ruby or parenthesized hiragana in Obsidian answers. Email retains HTML ruby. | Optional | `"html"` | `"parentheses"` |
-| `config.json` | `llm_endpoint` | String containing an HTTPS host and endpoint path, optional valid port, and no userinfo, query, or fragment; accepts `messages` and JSON-object response format, and returns JSON text in `choices[0].message.content` | LLM generation or review | Unset; no LLM request can proceed | `"https://provider.example/v1/chat/completions"` |
+| `config.json` (proposed revision, section 10) | `llm_endpoint` | String containing an HTTPS host and endpoint path, optional valid port, and no userinfo, query, or fragment; implements the Responses request and output contract in section 10.2 | LLM generation or review | Unset; no LLM request can proceed | `"https://api.openai.com/v1/responses"` |
 | `config.json` | `generation_model` | Nonempty string identifying the provider's lesson-generation model | LLM generation/review pipeline | Unset; the pipeline cannot proceed | `"your-generation-model"` |
 | `config.json` | `review_model` | Nonempty string identifying the provider's content-review model | LLM generation/review pipeline | Unset; the pipeline cannot proceed | `"your-review-model"` |
+| `config.json` (proposed, section 10) | `generation_reasoning_effort` | String selecting reasoning effort for initial and corrected drafts: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"medium"` |
+| `config.json` (proposed, section 10) | `review_reasoning_effort` | String selecting reasoning effort for each content-review request: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"high"` |
 | `config.json` | `google_client_id` | Nonempty string identifying the Google OAuth application used to refresh Gmail access | Gmail delivery | Unset; Gmail delivery cannot proceed | `"your-client-id.apps.googleusercontent.com"` |
 | `secrets.json` | `llm_api_key` | Nonempty string used to authenticate requests to the configured LLM endpoint | LLM generation or review | Unset; no LLM request can proceed | `"<your-llm-api-key>"` |
 | `secrets.json` | `google_client_secret` | Nonempty string authenticating the configured Google OAuth application during refresh | Gmail delivery | Unset; Gmail delivery cannot proceed | `"<your-google-client-secret>"` |
@@ -345,3 +349,47 @@ Add offline tests for both unknown-email operator decisions, timezone-aware acce
 After implementation, update README setup/commands and the reconciliation with measured test evidence. Contributor commit guidance should describe the observed `feat:`/`fix:` examples without claiming a broader established convention. Assess the sample's English, Japanese, traditional-script Cantonese, options, and readings; describe subjective difficulty and duration as unverified until evaluated by the user. Do not label synthetic model verdicts as proof of linguistic correctness.
 
 Actual provider review, Gmail receipt, Apple Mail/Obsidian interaction on both devices, offline reading, iCloud transfer, launchd execution, and Mac notification display remain acceptance work. Approval of this revision authorizes offline implementation and fake-service testing only. Published-content correction tooling remains deferred and requires its own specification and explicit operator action.
+
+## 10. Responses API and optional reasoning-effort overrides (proposed)
+
+**Status: awaiting explicit approval before implementation or tests.** The user requested optional overrides of the `medium` reasoning default and use of Responses. Separate effort settings and the adapter details below are proposed implementation requirements for review. On approval, this section replaces section 2's earlier Chat Completions endpoint contract (`messages`, `response_format`, and `choices[0].message.content`) and permits the two new configuration fields despite section 9's restriction on new fields. All other approved requirements continue to apply.
+
+### 10.1 Configuration
+
+Use the two optional `config.json` fields defined in the configuration table. Each independently defaults to `medium` when omitted; setting one does not change the other. Accept only the exact lowercase strings listed in the table. Reject empty strings, `null`, incorrect types, and other values with a safe error naming the file and field, before opening SQLite or loading credentials. This revision excludes `none` and `minimal`, which GPT-6.1 Sol does not support.
+
+For example, this proposed configuration keeps generation at medium and increases review to high:
+
+```json
+{
+  "db_path": "~/.config/n1-daily/lessons.sqlite3",
+  "llm_endpoint": "https://api.openai.com/v1/responses",
+  "generation_model": "gpt-6.1-sol",
+  "review_model": "gpt-6.1-sol",
+  "review_reasoning_effort": "high"
+}
+```
+
+Existing Chat Completions configurations require an explicit endpoint update after migration. The adapter sends only Responses requests; it does not infer a protocol from the URL, rewrite configured URLs, or fall back to Chat Completions. Preserve the endpoint safety checks in section 9.1. Compatible providers must implement the same Responses contract and support the selected model and effort.
+
+### 10.2 Responses requests and output handling
+
+Use Python's standard-library HTTP client to POST to the configured endpoint; OpenAI's endpoint is `https://api.openai.com/v1/responses`. Authenticate using the existing API key in the request header. Send the selected `model`, existing system and user messages as an `input` array, `text: {"format": {"type": "json_object"}}`, `reasoning: {"effort": "<selected value>"}`, and `store: false`. Retain explicit JSON instructions and all existing assignment, history, sample-shape, correction, and review criteria in the prompts. This migration retains JSON mode and the application checks; strict JSON Schema output is outside this revision.
+
+Send `medium` explicitly when an effort field is omitted. Initial and corrected drafts use generation effort; both initial and subsequent reviews use review effort. Requests resumed after an outage use the configuration supplied for that invocation. Do not silently omit effort, downgrade it, or switch models if the provider rejects a request.
+
+Each request supplies its complete context independently. Do not use `previous_response_id`, remote conversations, tools, streaming, background execution, or replayed reasoning items. SQLite remains authoritative. `store: false` disables API response-state storage; it does not establish a broader zero-retention guarantee.
+
+Require response `status` to be `completed` before accepting lesson or review content. Traverse the typed `output` array and concatenate `output_text` content from completed assistant messages in order, accepting messages with `phase` absent or `final_answer`. Ignore reasoning items and commentary messages; do not assume the first output item contains the answer or rely on an SDK-only `output_text` helper. Parse the resulting text as one unfenced JSON object and run the existing checks.
+
+Treat incomplete responses, refusals, missing final text, malformed output structure, and invalid/non-object JSON as invalid model responses through the existing quality-failure and one-correction rules; none may mark a lesson ready. Provider responses reporting a service error or failed execution, HTTP failures, timeouts, and interrupted reads follow the existing retryable service-failure path, preserving phase, saved drafts, and correction budget. Report only safe reasons; exclude provider error/refusal text, response bodies, and credentials from diagnostics.
+
+Changing effort or migrating the adapter affects only subsequent model requests. Preserve saved ready lessons, review results, readiness criteria, correction budgets, request timeouts, and publication windows. Preview and delivery continue without model calls or Responses settings.
+
+### 10.3 Acceptance and documentation
+
+After approval, use offline tests to demonstrate independent defaults and overrides, every accepted effort, invalid-value rejection, and Responses parameters on initial drafts, corrections, reviews, and resumed requests. Test reasoning preceding final text, split text content, commentary exclusion, incomplete/refused/failed responses, malformed output, and invalid/non-object JSON. Verify provider rejection without protocol or effort fallback, transport recovery without budget reset, and invalid-output handling within the correction limit. Confirm that saved ready lessons remain usable without LLM requests.
+
+Update README setup, the configuration template, and affected tests after approval to use Responses, describe migration from the old endpoint, and show a medium-generation/high-review example. Describe higher effort as a configurable choice whose quality, latency, and cost need evaluation. Fake-service tests establish protocol handling; they do not establish linguistic quality. Approval covers implementation and offline tests; actual provider requests and delivery activation retain their existing approval boundaries.
+
+The [official migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) recommends Responses for new projects and describes its input/output contract and storage settings. The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) defines `reasoning.effort`, and the [JSON output guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) documents `text.format` and incomplete/refused responses. The [GPT-6.1 Sol model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) defines its supported effort values and medium default. These references establish API behavior; section 10's product choices remain subject to user approval.

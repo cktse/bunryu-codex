@@ -21,7 +21,7 @@ class ServiceUnavailable(Exception):
 
 
 class InvalidResponse(Exception):
-    """A completed model response does not contain the required JSON."""
+    """A model response lacks complete, usable JSON content."""
 
 
 def post_json(url, payload, headers, timeout):

@@ -76,7 +76,9 @@ class ConfiguredModel:
             self.config.require("llm_endpoint", "generation_model", "review_model")
             credentials = self.secrets.require("llm_api_key")
             self._client = JsonModel(self.config.llm_endpoint, credentials.llm_api_key,
-                                     self.generation_model, self.review_model, self.config.timeout_seconds)
+                                     self.generation_model, self.review_model, self.config.timeout_seconds,
+                                     generation_reasoning_effort=self.config.generation_reasoning_effort,
+                                     review_reasoning_effort=self.config.review_reasoning_effort)
         return self._client
 
     def draft(self, context, failures, previous):
@@ -217,8 +219,6 @@ def main(arguments=None):
         config.check_database_path()
         now = datetime.now(ZoneInfo("Asia/Hong_Kong"))
         day = (getattr(args, "date", None) or now.date()).isoformat()
-        if args.command == "generate" and (day != now.date().isoformat() or not config.generate_time <= now.time() <= config.cutoff_time):
-            raise ValueError("Generation is limited to today between generate_time and cutoff_time")
         if args.command == "publish" and (day != now.date().isoformat() or not config.publish_time <= now.time() <= config.cutoff_time):
             raise ValueError("Publication is limited to today's configured window; use preview to view another date")
         if args.command == "status":

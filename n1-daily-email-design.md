@@ -8,7 +8,11 @@ Status: approved implementation baseline. This document defines the first workin
 
 **Reconciliation revision: approved.** Section 9 defines corrections for findings F1–F8 and resolves the associated scope and validation questions. Approval covers offline implementation and tests against sections 1–7, the previously approved revisions, and section 9. Email, real-vault writes, and scheduling still require separate activation.
 
-**Responses API and reasoning-effort revision: proposed, awaiting approval.** Section 10 proposes replacing the Chat Completions adapter with Responses and adding optional, separate generation and review effort settings with `medium` defaults. The three proposed rows in the configuration table are part of that revision. The approved Chat Completions implementation baseline remains in force until explicit approval.
+**Responses API and reasoning-effort revision: approved.** Section 10 replaces the Chat Completions adapter with Responses and adds optional, separate generation and review effort settings with `medium` defaults. The endpoint revision and two new rows in the configuration table are approved. Approval covers implementation and offline tests; actual provider requests and delivery activation retain their existing approval boundaries.
+
+**Manual generation revision: approved.** Section 11 removes the date and time restrictions from manual `generate`. Daily generation and publication retain their approved windows. Approval covers implementation and offline tests; live requests and activation retain their existing boundaries.
+
+**External scheduling revision: proposed, awaiting approval.** Section 12 proposes moving execution times, publication windows, and retry cadence to the external scheduler. Sections 1–11 remain the implementation baseline until this revision is approved.
 
 ## Development process
 
@@ -77,11 +81,11 @@ Load nonsecret settings from `config.json` and credentials from `secrets.json`, 
 | `config.json` | `cutoff_time` | String in 24-hour `HH:MM` format; latest permitted start of publication for today's lesson | Optional | `"12:00"` | `"12:00"` |
 | `config.json` | `timeout_seconds` | Finite JSON number greater than zero and at most 300; timeout for each LLM, OAuth, or Gmail HTTP request | Optional | `30` | `45` |
 | `config.json` | `ruby_mode` | String `html` or `parentheses`; selects ruby or parenthesized hiragana in Obsidian answers. Email retains HTML ruby. | Optional | `"html"` | `"parentheses"` |
-| `config.json` (proposed revision, section 10) | `llm_endpoint` | String containing an HTTPS host and endpoint path, optional valid port, and no userinfo, query, or fragment; implements the Responses request and output contract in section 10.2 | LLM generation or review | Unset; no LLM request can proceed | `"https://api.openai.com/v1/responses"` |
+| `config.json` | `llm_endpoint` | String containing an HTTPS host and endpoint path, optional valid port, and no userinfo, query, or fragment; implements the Responses request and output contract in section 10.2 | LLM generation or review | Unset; no LLM request can proceed | `"https://api.openai.com/v1/responses"` |
 | `config.json` | `generation_model` | Nonempty string identifying the provider's lesson-generation model | LLM generation/review pipeline | Unset; the pipeline cannot proceed | `"your-generation-model"` |
 | `config.json` | `review_model` | Nonempty string identifying the provider's content-review model | LLM generation/review pipeline | Unset; the pipeline cannot proceed | `"your-review-model"` |
-| `config.json` (proposed, section 10) | `generation_reasoning_effort` | String selecting reasoning effort for initial and corrected drafts: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"medium"` |
-| `config.json` (proposed, section 10) | `review_reasoning_effort` | String selecting reasoning effort for each content-review request: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"high"` |
+| `config.json` | `generation_reasoning_effort` | String selecting reasoning effort for initial and corrected drafts: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"medium"` |
+| `config.json` | `review_reasoning_effort` | String selecting reasoning effort for each content-review request: `low`, `medium`, `high`, `xhigh`, or `max` | Optional | `"medium"` | `"high"` |
 | `config.json` | `google_client_id` | Nonempty string identifying the Google OAuth application used to refresh Gmail access | Gmail delivery | Unset; Gmail delivery cannot proceed | `"your-client-id.apps.googleusercontent.com"` |
 | `secrets.json` | `llm_api_key` | Nonempty string used to authenticate requests to the configured LLM endpoint | LLM generation or review | Unset; no LLM request can proceed | `"<your-llm-api-key>"` |
 | `secrets.json` | `google_client_secret` | Nonempty string authenticating the configured Google OAuth application during refresh | Gmail delivery | Unset; Gmail delivery cannot proceed | `"<your-google-client-secret>"` |
@@ -327,7 +331,7 @@ The existing command set has the following contract:
 | --- | --- |
 | `preview` | Render checked input to the configured/overridden preview directory; preserve existing output and ruby options. |
 | `validate` | Run the checks above and report their scope; create no preview files. |
-| `generate` | Generate or resume today's lesson from `generate_time` through `cutoff_time`, including both endpoints. An explicit date must equal today's Asia/Hong_Kong date. Reject past/future dates and requests outside that window before creating a lesson or calling a model. Delivery remains separate. |
+| `generate` | Generate or resume the selected date's lesson at any time under section 11. Default to today's Asia/Hong_Kong date; explicit dates may be past or future. Reuse ready content and preserve saved phase and correction limits. Delivery remains separate. |
 | `publish` | Publish today's saved ready lesson within the configured publication window, only to explicitly activated channels. Reuse saved content and bytes; do not generate. |
 | `daily` | Apply generation/publication windows to today, using only explicitly activated channels; skip completed work and send no backlog. |
 | `status` | Read an existing record for the selected date, defaulting to today. Report persisted states and reasons without creating a database, recovering sends, reading secrets, or changing records. |
@@ -350,15 +354,15 @@ After implementation, update README setup/commands and the reconciliation with m
 
 Actual provider review, Gmail receipt, Apple Mail/Obsidian interaction on both devices, offline reading, iCloud transfer, launchd execution, and Mac notification display remain acceptance work. Approval of this revision authorizes offline implementation and fake-service testing only. Published-content correction tooling remains deferred and requires its own specification and explicit operator action.
 
-## 10. Responses API and optional reasoning-effort overrides (proposed)
+## 10. Responses API and optional reasoning-effort overrides
 
-**Status: awaiting explicit approval before implementation or tests.** The user requested optional overrides of the `medium` reasoning default and use of Responses. Separate effort settings and the adapter details below are proposed implementation requirements for review. On approval, this section replaces section 2's earlier Chat Completions endpoint contract (`messages`, `response_format`, and `choices[0].message.content`) and permits the two new configuration fields despite section 9's restriction on new fields. All other approved requirements continue to apply.
+**Status: approved.** The user approved optional overrides of the `medium` reasoning default, use of Responses, and the adapter details below. This section replaces section 2's earlier Chat Completions endpoint contract (`messages`, `response_format`, and `choices[0].message.content`) and permits the two new configuration fields despite section 9's restriction on new fields. All other approved requirements continue to apply.
 
 ### 10.1 Configuration
 
 Use the two optional `config.json` fields defined in the configuration table. Each independently defaults to `medium` when omitted; setting one does not change the other. Accept only the exact lowercase strings listed in the table. Reject empty strings, `null`, incorrect types, and other values with a safe error naming the file and field, before opening SQLite or loading credentials. This revision excludes `none` and `minimal`, which GPT-6.1 Sol does not support.
 
-For example, this proposed configuration keeps generation at medium and increases review to high:
+For example, this configuration keeps generation at medium and increases review to high:
 
 ```json
 {
@@ -388,8 +392,48 @@ Changing effort or migrating the adapter affects only subsequent model requests.
 
 ### 10.3 Acceptance and documentation
 
-After approval, use offline tests to demonstrate independent defaults and overrides, every accepted effort, invalid-value rejection, and Responses parameters on initial drafts, corrections, reviews, and resumed requests. Test reasoning preceding final text, split text content, commentary exclusion, incomplete/refused/failed responses, malformed output, and invalid/non-object JSON. Verify provider rejection without protocol or effort fallback, transport recovery without budget reset, and invalid-output handling within the correction limit. Confirm that saved ready lessons remain usable without LLM requests.
+Use offline tests to demonstrate independent defaults and overrides, every accepted effort, invalid-value rejection, and Responses parameters on initial drafts, corrections, reviews, and resumed requests. Test reasoning preceding final text, split text content, commentary exclusion, incomplete/refused/failed responses, malformed output, and invalid/non-object JSON. Verify provider rejection without protocol or effort fallback, transport recovery without budget reset, and invalid-output handling within the correction limit. Confirm that saved ready lessons remain usable without LLM requests.
 
-Update README setup, the configuration template, and affected tests after approval to use Responses, describe migration from the old endpoint, and show a medium-generation/high-review example. Describe higher effort as a configurable choice whose quality, latency, and cost need evaluation. Fake-service tests establish protocol handling; they do not establish linguistic quality. Approval covers implementation and offline tests; actual provider requests and delivery activation retain their existing approval boundaries.
+Update README setup, the configuration template, and affected tests to use Responses, describe migration from the old endpoint, and show a medium-generation/high-review example. Describe higher effort as a configurable choice whose quality, latency, and cost need evaluation. Fake-service tests establish protocol handling; they do not establish linguistic quality. Approval covers implementation and offline tests; actual provider requests and delivery activation retain their existing approval boundaries.
 
-The [official migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) recommends Responses for new projects and describes its input/output contract and storage settings. The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) defines `reasoning.effort`, and the [JSON output guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) documents `text.format` and incomplete/refused responses. The [GPT-6.1 Sol model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) defines its supported effort values and medium default. These references establish API behavior; section 10's product choices remain subject to user approval.
+The [official migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses) recommends Responses for new projects and describes its input/output contract and storage settings. The [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) defines `reasoning.effort`, and the [JSON output guide](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses) documents `text.format` and incomplete/refused responses. The [GPT-6.1 Sol model documentation](https://developers.openai.com/api/docs/models/gpt-6.1-sol) defines its supported effort values and medium default. These references establish API behavior; the user separately approved section 10's product choices.
+
+## 11. Flexible manual generation
+
+**Status: approved.** The user approved removing the validation that limits generation to today between `generate_time` and `cutoff_time`. This change applies to the manual `generate` command. It replaces the earlier `generate` contract in section 9.2 and relaxes section 3.2's retry-window restriction for manual invocations. Daily generation and publication retain their approved windows.
+
+### 11.1 Command behavior
+
+Allow `python3 -m n1_daily generate` at any local time. Default to today's Asia/Hong_Kong date; an explicit `--date` may select any valid past, present, or future date. Remove the combined date/time rejection and its associated error. Keep explicit configuration, safe paths, finite service timeouts, content checks, and the database run lock.
+
+Generate a lesson for a date with no record, or resume an existing record with a retryable configuration/service failure from its saved phase. Reuse the persisted assignment and retain the draft, correction feedback, and attempt count. Existing assignment and published-history rules continue to apply.
+
+A ready lesson remains reusable without another model call. A terminal failure, including exhausted corrections or a previously closed missed day, remains failed; this change does not reset it. Removing the validation permits retries after interruptions at any time, while retaining the existing one-correction limit. Forced regeneration, replacing ready/published content, and reopening closed days require separate requirements.
+
+Manual generation continues to save content without delivery or publication accounting. `daily` still generates only within its configured window for today. `publish` still requires today's date, the publication window, and explicitly activated channels. Past/future lessons remain locally inspectable through `preview`; they do not create backlog delivery.
+
+### 11.2 Acceptance and documentation
+
+Test manual generation before `generate_time`, after `cutoff_time`, and for past/future dates using temporary databases and fake services. Cover interrupted generation/review recovery outside the window, retained correction budgets, ready-lesson reuse without secrets, terminal failures remaining closed, and the run lock. Retain coverage of `daily` and `publish` window restrictions. Update README commands and the reconciliation with verified behavior. Add no commands, flags, or configuration fields. Approval covers implementation and offline tests; live provider requests and activation retain their existing boundaries.
+
+## 12. External scheduling owns timing (proposed)
+
+**Status: awaiting explicit approval before implementation or tests.** The user prefers scheduling decisions to be made by an external scheduler. The requirements below propose applying that preference to the remaining `daily` and `publish` time gates and cutoff accounting. On approval, this section supersedes conflicting timing requirements in sections 2, 3.2, 6.3, 9.2–9.3, 10, and 11. The desired daily delivery time remains approximately 08:00 Asia/Hong_Kong; the scheduler implements that policy.
+
+### 12.1 Invocation and retries
+
+The external scheduler determines when commands run, how often to retry, and when to stop invoking them. Scripts perform one bounded invocation and exit; they impose no earliest execution time, publication time, or daily cutoff. Keep per-request HTTP timeouts and the run lock.
+
+`generate` retains section 11's behavior. `publish` attempts today's saved ready lesson immediately when invoked, using only explicitly activated channels. `daily` generates or resumes today's lesson, then immediately attempts its activated channels once the lesson is ready. Date selection remains unchanged: manual generation permits any selected date; publication and the daily runner operate on today in Asia/Hong_Kong and do not scan for a backlog.
+
+Definite failures remain available for a later invocation, which retries only unfinished work. Unknown Gmail outcomes still require mailbox resolution. Preserve successful channels, saved MIME bytes, correction limits, observed publication timestamps, and review exposure accounting. Do not close a day or record/notify a missed or partial window solely because the clock passed a configured time or an attempt finished after midnight. Preserve historical records and existing terminal failures; reopening them remains outside this revision.
+
+### 12.2 Configuration and scheduler setup
+
+Retire `generate_time`, `publish_time`, and `cutoff_time` as active application settings. For configuration compatibility, continue accepting these legacy keys as valid `HH:MM` strings, but ignore their values and remove their cross-field ordering checks. Remove them from the example configuration and identify them as deprecated in the configuration table and README. Add no replacement timing fields or CLI flags.
+
+The existing `schedule` command remains an optional exporter of an inactive launchd template. Preserve its explicit paths, activation flags, minute interval, and existing logging setup; the operator controls timing by editing the external scheduler configuration before installation. README must identify the interval as a template choice and explain separate `generate`/`publish` scheduling or a combined `daily` invocation. No scheduler installation, activation, or new scheduling tools are authorized by this revision.
+
+### 12.3 Acceptance and documentation
+
+After approval, replace tests for script time gates with offline tests showing `daily` and `publish` proceed before the former start times and after the former cutoff. Cover delivery across cutoff/midnight, unfinished-channel retries on later invocations, unchanged no-backlog/date rules, ignored legacy timing values without ordering constraints, and absence of automatic missed/partial closure. Preserve tests for duplicate-run prevention, ready-content reuse, uncertain email outcomes, observed publication/review timestamps, and edited-file protection. Update setup guidance and reconciliation evidence. Live provider requests, email, real-vault writes, and scheduler activation retain their separate approval boundaries.

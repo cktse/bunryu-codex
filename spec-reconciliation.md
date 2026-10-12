@@ -27,6 +27,22 @@ The forward specification baseline is explicitly approved. README documents the 
 
 Static reading found the sample's English and traditional-script Cantonese supplements readable. The Japanese ordering explanation now states the comparison in context. The sample's N1 difficulty and estimated duration remain unverified by the user; synthetic verdicts and static reading do not establish linguistic acceptance. Actual provider behavior, received messages, iPhone clients, offline controls, enlarged-text legibility, iCloud synchronization, launchd execution, and Mac notification display remain pending separately authorized acceptance work. No live services, real-vault lesson writes, or scheduling were activated.
 
+## Approved Responses API follow-up
+
+The user approved specification section 10. Generation and review now use Responses with complete context on every request, JSON mode through `text.format`, explicit `reasoning.effort`, and `store: false`. Output parsing accepts completed final assistant text, skips reasoning/commentary, and rejects incomplete, refused, malformed, or non-object output. Existing service recovery and the one-correction limit remain in force.
+
+Both effort fields independently default to medium and accept the five approved values. Existing Chat Completions configurations require an explicit endpoint update; no protocol, model, or effort fallback was added. README documents migration and a medium-generation/high-review example, and the configuration template records both medium defaults.
+
+Validation: **133 tests passed**, including 18 new tests in [test_responses.py](tests/test_responses.py). The initial failing run established the missing configuration and protocol behavior before implementation. Tests cover exact serialized HTTP requests through a fake standard-library transport, effort routing on corrections and reviews, split final output after reasoning/commentary, safe provider failures, outage recovery with updated settings, persisted correction limits across restarts, and saved previews without settings or credentials. Review verdicts remain synthetic fixtures.
+
+Standalone `python3 -m n1_daily preview` produced all five sample artifacts in a temporary directory, and `python3 -m n1_daily validate` passed. The diff was checked against approved section 10; no scope deviations were identified. No actual provider request, real-vault lesson write, email delivery, or scheduling activation occurred. Provider compatibility and linguistic quality remain live acceptance work requiring separate authorization.
+
+## Approved manual-generation follow-up
+
+The user approved section 11. Manual `generate` now accepts any valid selected date at any time, defaulting to today in Asia/Hong_Kong. It resumes retryable configuration/service failures with the saved assignment, draft, feedback, and correction budget. Ready content is reused without model calls or credentials; terminal failures remain closed. Generation performs no delivery or publication accounting. Daily generation and publication retain their approved timing rules pending review of proposed section 12.
+
+Validation: **142 tests passed**, including nine new cases in [test_manual_generation.py](tests/test_manual_generation.py). The initial run failed on the old date/time gate before its removal. Offline fixtures exercise past/future dates, midnight and late-night invocations, interrupted generation/review across restarts, repaired setup, preserved correction feedback, ready-content reuse without secrets, terminal failures, and overlap prevention. Existing rejection tests now verify publication restrictions, and daily window tests continue to pass. The implementation change removes only the manual generation guard; no broader scheduling change or live service activation was implemented.
+
 ## Evidence and limits
 
 - `python3 -m unittest discover -s tests -v`: **79 tests passed**. Tests use temporary databases/vaults and fake services.

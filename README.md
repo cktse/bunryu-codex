@@ -55,7 +55,24 @@ Copy `config.example.json` and `secrets.example.json` into a private directory o
 
 Pass paths explicitly with `--config` and `--secrets`. The application reads JSON directly and passes credentials to service clients in memory. Application environment variables and dotenv files are no longer supported. The [[n1-daily-email-design#Configuration and secrets|configuration table]] defines each field, its requirements, default, and an example.
 
-Set `llm_endpoint`, `generation_model`, and `review_model` in `config.json`, and `llm_api_key` in `secrets.json`. The endpoint needs an HTTPS host and path, with no userinfo, query string, or fragment. Authentication uses the request header. It must accept `messages` and `response_format: {"type":"json_object"}`, and return JSON text in `choices[0].message.content`. Providers with another protocol need a separately reviewed adapter. All service requests use a finite configurable timeout.
+Set `llm_endpoint`, `generation_model`, and `review_model` in `config.json`, and `llm_api_key` in `secrets.json`. The adapter uses the Responses API. The endpoint needs an HTTPS host and path, with no userinfo, query string, or fragment. Compatible providers must support Responses input/output, JSON mode, and the selected reasoning effort. Authentication uses the request header. All service requests use the configured finite timeout, defaulting to 30 seconds.
+
+For GPT-6.1 Sol, this configuration uses medium effort for generation and high for review:
+
+```json
+{
+  "db_path": "~/.config/n1-daily/lessons.sqlite3",
+  "llm_endpoint": "https://api.openai.com/v1/responses",
+  "generation_model": "gpt-6.1-sol",
+  "review_model": "gpt-6.1-sol",
+  "generation_reasoning_effort": "medium",
+  "review_reasoning_effort": "high"
+}
+```
+
+Both effort fields are optional and independently default to `medium`. Valid values are `low`, `medium`, `high`, `xhigh`, and `max`; the adapter sends the selected value explicitly on every request. Generation effort applies to initial and corrected drafts, while review effort applies to every content review. Higher effort's effect on lesson quality, latency, and cost remains unmeasured for this project. If requests time out, `timeout_seconds` can be increased up to 300; effort and timeout never change automatically.
+
+To migrate an existing configuration, replace the old Chat Completions URL with your provider's Responses endpoint; for OpenAI, use `https://api.openai.com/v1/responses`. Existing model names can remain if they support Responses and the selected effort. The adapter does not rewrite URLs or fall back to another protocol, model, or effort. Changing settings affects future requests; saved ready lessons retain their content and reviews.
 
 ```sh
 python3 -m n1_daily generate --config /path/to/config.json --secrets /path/to/secrets.json
@@ -63,7 +80,16 @@ python3 -m n1_daily status --config /path/to/config.json
 python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09
 ```
 
-Run `generate` for today's Asia/Hong_Kong date between `generate_time` and `cutoff_time`, inclusive (defaults 07:45–12:00). Past/future dates and calls outside that window are rejected before creating a lesson or contacting a model. It saves content and its matching structured review before readiness. `preview --date` can inspect a saved ready lesson from any date without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
+Run `generate` at any time. It defaults to today's Asia/Hong_Kong date; `--date YYYY-MM-DD` can select a past or future date. It saves content and its matching structured review before readiness and resumes retryable configuration/service failures from the saved phase. Rerunning preserves the assignment, draft, feedback, and correction budget. Ready lessons are reused without model calls; terminal failures, including exhausted corrections and previously closed missed days, remain failed.
+
+For example, generate a selected date, then preview it locally:
+
+```sh
+python3 -m n1_daily generate --config /path/to/config.json --secrets /path/to/secrets.json --date 2026-10-09
+python3 -m n1_daily preview --config /path/to/config.json --date 2026-10-09 --output /tmp/n1-selected-lesson
+```
+
+Manual generation does not publish or record a review exposure. `daily` and `publish` retain their configured windows and no-backlog behavior. `preview --date` can inspect a saved ready lesson from any date without consulting the LLM. SQLite defaults to `~/Library/Application Support/N1Daily/lessons.sqlite3`; `db_path` or `--db` can select another location outside iCloud and the vault. Previewing the sample does not create a database.
 
 `--config` is required for `generate`, `publish`, `daily`, and `schedule`. Sample previews work without either private file. Secrets are loaded only when generation, review, or an unfinished Gmail send requires them. Saved ready lessons and completed channels remain usable without LLM credentials; vault delivery needs no secret file. Channel setup failures are independent: invalid email credentials allow vault delivery, and a missing/unwritable vault allows email delivery. Completed channels do not require their service settings.
 
@@ -74,10 +100,11 @@ Relative data paths are resolved against the configuration file's directory; `~`
 ## Implementation choices
 
 - Python's standard library supplies SQLite, Unicode processing, MIME email, HTTP, tests, and macOS file locking. Modules separate content checks, rendering, persistence, generation, and delivery.
+- Responses requests contain complete context, `input` messages, JSON mode through `text.format`, the selected `reasoning.effort`, and `store: false`. No remote conversation or response chain is used. Final text is assembled from completed assistant output, excluding reasoning and commentary. JSON mode and local checks enforce the existing content gate; strict JSON Schema output is deferred. Disabling response-state storage does not establish a broader zero-retention guarantee.
 - The first three slots cover kanji, vocabulary, and grammar. Paraphrase, usage, and reading-comprehension slots use vocabulary targets; ordering uses grammar targets. Themes and format rotation advance once on first publication. Due reviews fill compatible slots, with a daily cap of two; ties use question ID, then original lesson ID.
 - Published lessons supply teaching history. Failed drafts remain available for diagnostics and do not reserve targets or wording. Malformed published entries produce date/field diagnostics while usable questions remain available.
 - Ruby ranges use NFC text and half-open Unicode code-point offsets. `distractors_ja.B` identifies a distractor field. Markdown uses inline ruby by default; `"ruby_mode": "parentheses"` or `--ruby-mode parentheses` provides the answer-only hiragana fallback.
-- A persisted generation phase resumes an interrupted request or review. One corrected draft is allowed; exhausted quality failures remain failed across restarts. Truncated HTTP responses and transport failures remain retryable in the window. Failed reviews require concrete offending text and a requested change. Complete drafts and verdicts are saved before delivery.
+- A persisted generation phase resumes an interrupted request or review. One corrected draft is allowed; exhausted quality failures remain failed across restarts. Manual generation can retry truncated responses, transport failures, or repaired configuration at any time; `daily` applies its configured window. Failed reviews require concrete offending text and a requested change. Complete drafts and verdicts are saved before delivery.
 - Each channel retains its own result. Email bytes and a `sending` marker are committed before Gmail contact. Interrupted sends become `unknown`; definite rejection and pre-send OAuth failures are retryable. Saved bytes are reused. SQLite records observed acceptance/write-completion time and review exposure in one transaction.
 - Markdown files and the index use atomic replacement with persisted checksums. Unexpected edits are preserved and reported. A pending checksum permits recovery after a completed write interrupted before status recording. Personal notes are never created or modified.
 
@@ -103,7 +130,7 @@ For `unknown` email outcomes, inspect the sending mailbox. `resolve-email --date
 
 ## Validation before daily use
 
-Tests cover malformed content/history/ruby, ambiguous/incomplete reviews, correction limits, truncated responses, independent channel setup/retries, crash recovery, review dates/ties, unknown-email resolution, duplicate runs, actual completion times, cutoff behavior, and edited-file conflicts. Configuration and CLI tests cover defaults, overrides, permissions, ownership, secret isolation, read-only access, input conflicts, validation scope, and date/window restrictions. Temporary directories and fake services keep tests offline. See the [reconciliation follow-up](spec-reconciliation.md#approved-reconciliation-follow-up) for the findings and regression evidence.
+Tests cover malformed content/history/ruby, ambiguous/incomplete reviews, correction limits, truncated responses, independent channel setup/retries, crash recovery, review dates/ties, unknown-email resolution, duplicate runs, actual completion times, cutoff behavior, and edited-file conflicts. Configuration and CLI tests cover defaults, overrides, permissions, ownership, secret isolation, read-only access, input conflicts, validation scope, and date/window restrictions. Responses tests cover serialized HTTP requests, separate effort settings, final-text extraction, refusals/incomplete output, safe service failures, and recovery without protocol fallback or budget resets. Temporary directories and fake services keep tests offline. See the [reconciliation follow-up](spec-reconciliation.md#approved-reconciliation-follow-up) for the findings and regression evidence.
 
 A static prose review found the sample's English and traditional-script Cantonese supplements readable. The ordering explanation was made specific about what `にもまして` compares in this sentence. Several questions use clear contrasts between distractors, so the sample's N1 difficulty and 12-minute estimate still need your assessment. This review does not replace the automated linguistic gate or actual-provider acceptance tests.
 

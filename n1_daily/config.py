@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 
 CONFIG_FIELDS = {"db_path", "preview_path", "vault_path", "sender", "recipient", "timezone",
                  "generate_time", "publish_time", "cutoff_time", "timeout_seconds", "ruby_mode",
-                 "llm_endpoint", "generation_model", "review_model", "google_client_id"}
+                 "llm_endpoint", "generation_model", "review_model", "google_client_id",
+                 "generation_reasoning_effort", "review_reasoning_effort"}
+REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 SECRET_FIELDS = {"llm_api_key", "google_client_secret", "google_refresh_token"}
 UNSET_FIELDS = {"vault_path", "sender", "recipient", "llm_endpoint", "generation_model",
                 "review_model", "google_client_id"}
@@ -103,6 +105,8 @@ class Config:
     llm_endpoint: str
     generation_model: str
     review_model: str
+    generation_reasoning_effort: str
+    review_reasoning_effort: str
     google_client_id: str
     timeout_seconds: float
     generate_time: time
@@ -116,7 +120,10 @@ class Config:
         source = check_private_path(path) if path is not None else "config.json (defaults)"
         values = read_object(source, CONFIG_FIELDS) if path is not None else {}
         for name, value in values.items():
-            if name == "timeout_seconds":
+            if name in ("generation_reasoning_effort", "review_reasoning_effort"):
+                if not isinstance(value, str) or value not in REASONING_EFFORTS:
+                    raise ConfigError(source, name, "expected low, medium, high, xhigh, or max")
+            elif name == "timeout_seconds":
                 if type(value) not in (int, float) or not 0 < value <= 300 or not math.isfinite(value):
                     raise ConfigError(source, name, "expected a finite number greater than 0 and at most 300")
             elif not isinstance(value, str) or (not value.strip() and not (name in UNSET_FIELDS and value == "")):
@@ -166,6 +173,8 @@ class Config:
             vault_path=data_path("vault_path"), sender=values.get("sender", ""), recipient=values.get("recipient", ""),
             timezone="Asia/Hong_Kong", llm_endpoint=endpoint,
             generation_model=values.get("generation_model", ""), review_model=values.get("review_model", ""),
+            generation_reasoning_effort=values.get("generation_reasoning_effort", "medium"),
+            review_reasoning_effort=values.get("review_reasoning_effort", "medium"),
             google_client_id=values.get("google_client_id", ""), timeout_seconds=values.get("timeout_seconds", 30),
             generate_time=generation, publish_time=publication, cutoff_time=cutoff,
             ruby_mode=values.get("ruby_mode", "html"), source=source)

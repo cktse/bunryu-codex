@@ -10,6 +10,7 @@ from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
 from test_content import sample
+from responses_fixtures import completed_response
 from n1_daily.cli import main, parser
 from n1_daily.config import Config
 from n1_daily.files import checksum, write_generated
@@ -54,18 +55,18 @@ class ServiceTests(unittest.TestCase):
                 send.assert_not_called()
 
     def test_model_prompt_contains_history_requirements_and_review_criteria(self):
-        model = JsonModel("https://model.example.test/chat/completions", "secret", "gen", "review", timeout=7)
+        model = JsonModel("https://model.example.test/v1/responses", "secret", "gen", "review", timeout=7)
         context = {"assignment": {"date": "2026-10-09"}, "previous_seven_published_lessons": [],
                    "all_earlier_subject_target_pairs": [["kanji", "旧語"]], "review_originals": []}
-        with patch("n1_daily.llm.post_json", return_value={"choices": [{"message": {"content": json.dumps(sample(), ensure_ascii=False)}}]}) as post:
+        with patch("n1_daily.llm.post_json", return_value=completed_response(sample())) as post:
             model.draft(context, ["q1.options missing D"], sample())
             body = post.call_args.args[1]
-            user = json.loads(body["messages"][1]["content"])
+            user = json.loads(body["input"][1]["content"])
             self.assertEqual(context, user["context"])
             self.assertIn("q1.options missing D", user["failures"])
             self.assertEqual(7, post.call_args.args[3])
             model.review(sample(), context)
-            prompt = post.call_args.args[1]["messages"][0]["content"]
+            prompt = post.call_args.args[1]["input"][0]["content"]
             self.assertIn("unique_answer", prompt)
             self.assertIn("all four", prompt)
             self.assertIn("offending_text", prompt)

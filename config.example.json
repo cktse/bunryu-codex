@@ -12,5 +12,7 @@
   "llm_endpoint": "",
   "generation_model": "",
   "review_model": "",
+  "generation_reasoning_effort": "medium",
+  "review_reasoning_effort": "medium",
   "google_client_id": ""
 }

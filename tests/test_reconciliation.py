@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from test_content import passing_review, sample
+from responses_fixtures import completed_response
 from test_workflow import FakeModel, FakeSender
 from n1_daily.cli import main
 from n1_daily.config import Config
@@ -84,7 +85,7 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_incomplete_review_preserves_draft_and_does_not_generate_again(self):
         model = JsonModel("https://provider.example/chat", "fixture-key", "gen", "review")
-        response = {"choices": [{"message": {"content": json.dumps(sample())}}]}
+        response = completed_response(sample())
         with patch("n1_daily.llm.post_json", side_effect=[response, IncompleteRead(b"private", 20)]):
             record = generate(self.store, "2026-10-09", model)
         self.assertEqual("reviewing", record["phase"])
@@ -312,12 +313,12 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(2, self.invoke(["status", "--db", str(missing)]))
         self.assertFalse(missing.exists())
 
-    def test_generation_date_and_window_rejected_before_storage_or_network(self):
+    def test_publication_date_and_window_rejected_before_services(self):
         for day, clock in (("2026-10-08", self.now), ("2026-10-10", self.now),
-                           ("2026-10-09", self.now.replace(hour=7, minute=44)),
+                           ("2026-10-09", self.now.replace(hour=7, minute=59)),
                            ("2026-10-09", self.now.replace(hour=12, minute=1))):
             with self.subTest(day=day, clock=clock), patch("n1_daily.services.urlopen", side_effect=AssertionError("network forbidden")):
-                self.assertEqual(2, self.invoke(["generate", "--config", str(self.config), "--date", day], clock))
+                self.assertEqual(2, self.invoke(["publish", "--activate-email", "--config", str(self.config), "--date", day], clock))
                 self.assertIsNone(self.store.get(day))
 
     def test_endpoint_rejects_all_queries_fragments_and_missing_paths(self):
@@ -418,10 +419,10 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(after.isoformat(), record["first_published_at"])
         self.assertEqual({"2026-10-11"}, {item["due_date"] for item in self.store.review_items()})
 
-    def test_generation_window_endpoints_and_overlap_are_enforced(self):
+    def test_manual_generation_reuses_ready_content_at_any_time_and_rejects_overlap(self):
         self.ready()
         args = ["generate", "--config", str(self.config)]
-        for clock in (self.now.replace(hour=7, minute=45), self.now.replace(hour=12, minute=0)):
+        for clock in (self.now.replace(hour=7, minute=44), self.now.replace(hour=12, minute=1)):
             self.assertEqual(0, self.invoke(args, clock))
         with run_lock(self.db):
             self.assertEqual(2, self.invoke(args))

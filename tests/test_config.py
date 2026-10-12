@@ -232,7 +232,7 @@ class JsonCliTests(unittest.TestCase):
         self.assertFalse((self.root / "unused-preview").exists())
 
     def test_missing_or_bad_secrets_block_generation_before_network(self):
-        self.config_path.write_text(json.dumps({"db_path": "lessons.sqlite3", "llm_endpoint": "https://provider.example/chat/completions", "generation_model": "gen", "review_model": "review"}))
+        self.config_path.write_text(json.dumps({"db_path": "lessons.sqlite3", "llm_endpoint": "https://provider.example/v1/responses", "generation_model": "gen", "review_model": "review"}))
         secrets = self.root / "secrets.json"
         secrets.write_text('{"llm_api_key":["DO_NOT_LOG"]}')
         secrets.chmod(0o600)
@@ -244,12 +244,12 @@ class JsonCliTests(unittest.TestCase):
     def test_json_config_drives_generation_and_review_without_secret_leaks(self):
         from test_content import passing_review, sample
         lesson = sample()
-        self.config_path.write_text(json.dumps({"db_path": "lessons.sqlite3", "llm_endpoint": "https://provider.example/chat/completions", "generation_model": "fixture-generator", "review_model": "fixture-reviewer", "timeout_seconds": 9}))
+        self.config_path.write_text(json.dumps({"db_path": "lessons.sqlite3", "llm_endpoint": "https://provider.example/v1/responses", "generation_model": "fixture-generator", "review_model": "fixture-reviewer", "timeout_seconds": 9}))
         secrets = self.root / "secrets.json"
         secrets.write_text('{"llm_api_key":"DO_NOT_LOG_KEY"}')
         secrets.chmod(0o600)
-        responses = [{"choices": [{"message": {"content": json.dumps(value)}}]}
-                     for value in (lesson, passing_review(lesson))]
+        from responses_fixtures import completed_response
+        responses = [completed_response(value) for value in (lesson, passing_review(lesson))]
         before = dict(os.environ)
         with patch("n1_daily.llm.post_json", side_effect=responses) as request:
             self.assertEqual(0, self.invoke(["generate", "--config", str(self.config_path), "--secrets", str(secrets), "--date", "2026-10-09"]))
